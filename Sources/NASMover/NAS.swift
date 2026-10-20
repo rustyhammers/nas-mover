@@ -238,7 +238,8 @@ enum NAS {
         for (name, paths) in job.lists {
             try await put(name, paths.joined(separator: "\n") + "\n")
         }
-        _ = try await SSH.check(t, "cd \(shq(dir)) && echo starting > state && setsid sh \(shq(home + "/.nasmover/runner.sh")) \(shq(dir)) </dev/null >runner.out 2>&1 &")
+        // Braces keep "&" on the runner alone; the outer shell exits at once so ssh (and Start) returns immediately.
+        _ = try await SSH.check(t, "cd \(shq(dir)) && echo starting > state && { setsid sh \(shq(home + "/.nasmover/runner.sh")) \(shq(dir)) </dev/null >runner.out 2>&1 & }")
     }
 
     static func jobs(_ h: HostID) async throws -> [JobInfo] {

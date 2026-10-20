@@ -401,7 +401,24 @@ verify_folder() {
 
 # --- Main --------------------------------------------------------------------
 
-trap 'echo cancelled > state; echo "Cancelled" > result; date +%s > finished; kill 0; exit 1' TERM INT
+on_cancel() {
+	trap '' TERM INT
+	kill -TERM 0 2>/dev/null   # rsync workers, hashing and the progress loop (this shell ignores it)
+	sleep 1
+	say "Cancelling: tidying up permissions"
+	n=1
+	while eval "[ -n \"\$COPY${n}_FROM\" ]"; do
+		load_copy $n
+		[ "$th" = unas ] && fix_unas_perms "$tp"
+		n=$((n + 1))
+	done
+	update_progress
+	date +%s > finished
+	echo "Cancelled. Files copied so far were kept; running it again picks up where it stopped." > result
+	echo cancelled > state
+	exit 1
+}
+trap on_cancel TERM INT
 echo running > state
 date +%s > started
 progress_loop &
