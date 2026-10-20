@@ -4,11 +4,13 @@ struct TransferView: View {
     var showJobs: () -> Void
 
     @State private var mode: TransferMode = .copy
-    @State private var source: Location?
+    @State private var browse: Location?
+    @State private var sources: [Location] = []
     @State private var destination: Location?
     @State private var verify = true
     @State private var previewing = false
-    @State private var preview: TransferPreview?
+    @State private var previews: [(Location, TransferPreview)]?
+    @State private var progressNote: String?
     @State private var error: String?
 
     var body: some View {
@@ -25,12 +27,13 @@ struct TransferView: View {
             }
 
             HStack(alignment: .top, spacing: 16) {
-                LocationPicker(title: mode == .copy ? "Copy this folder" : "Move this folder", location: $source, defaultHost: .qnap)
+                LocationPicker(title: mode == .copy ? "Tick the folders to copy" : "Tick the folders to move",
+                               location: $browse, checked: $sources, defaultHost: .qnap)
                 Image(systemName: "arrow.right.circle.fill")
                     .font(.system(size: 30))
                     .foregroundStyle(.secondary)
                     .padding(.top, 120)
-                LocationPicker(title: "Into this folder", location: $destination, defaultHost: .unas)
+                LocationPicker(title: "Into this folder (open it)", location: $destination, defaultHost: .unas)
             }
 
             Divider()
@@ -39,10 +42,14 @@ struct TransferView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     if let problem = validationProblem {
                         Label(problem, systemImage: "exclamationmark.circle").foregroundStyle(.orange)
-                    } else if let src = source, let dst = destination {
-                        Text("Result").font(.caption).foregroundStyle(.secondary)
-                        Text(dst.child(src.displayName).breadcrumb).font(.body.weight(.semibold)).textSelection(.enabled)
+                    } else if let dst = destination {
+                        Text(sources.count == 1 ? "Result" : "Results").font(.caption).foregroundStyle(.secondary)
+                        ForEach(sources.prefix(3), id: \.self) { src in
+                            Text(dst.child(src.displayName).breadcrumb).font(.body.weight(.semibold)).lineLimit(1).truncationMode(.head)
+                        }
+                        if sources.count > 3 { Text("…and \(sources.count - 3) more").font(.caption).foregroundStyle(.secondary) }
                     }
+                    if let progressNote { HStack { ProgressView().controlSize(.small); Text(progressNote) } }
                     if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
                 }
                 Spacer()
@@ -50,7 +57,7 @@ struct TransferView: View {
                     Toggle("Verify (MD5) and write ASC MHL manifest", isOn: $verify)
                         .help("Re-reads every file on both sides and compares MD5 checksums, then saves them in an ascmhl folder inside the copy. Recommended; roughly doubles the time.")
                 } else {
-                    Label("Always MD5-verified (with an ASC MHL manifest) before originals are recycled", systemImage: "checkmark.shield").foregroundStyle(.secondary)
+                    Label("Always MD5-verified before originals are recycled", systemImage: "checkmark.shield").foregroundStyle(.secondary)
                 }
                 Button {
                     Task { await runPreview() }
@@ -64,10 +71,11 @@ struct TransferView: View {
         }
         .padding(20)
         .navigationTitle("Copy / Move")
-        .sheet(isPresented: Binding(get: { preview != nil }, set: { if !$0 { preview = nil } })) {
-            if let preview, let source, let destination {
-                PreviewSheet(mode: mode, source: source, destination: destination, preview: preview, verify: mode == .move || verify) {
-                    self.preview = nil
+        .sheet(isPresented: Binding(get: { previews != nil }, set: { if !$0 { previews = nil } })) {
+            if let previews, let destination {
+                PreviewSheet(mode: mode, items: previews, destination: destination, verify: mode == .move || verify) {
+                    self.previews = nil
+                    sources = []
                     showJobs()
                 }
             }
@@ -76,37 +84,51 @@ struct TransferView: View {
 
     private var modeExplanation: String {
         switch mode {
-        case .copy: return "Copies the folder. Nothing at the source is touched. Newer files at the destination are never overwritten."
+        case .copy: return "Copies the ticked folders. Nothing at the source is touched. Newer files at the destination are never overwritten."
         case .move: return "Copies, verifies every file with MD5, then moves the originals to the source NAS's recycle bin."
         }
     }
 
     private var validationProblem: String? {
-        guard let src = source else { return "Choose the folder to \(mode == .copy ? "copy" : "move")." }
-        guard let dst = destination else { return "Choose where it should go." }
-        if mode == .move && src.rel.isEmpty { return "Pick a folder inside the share. Whole shares can't be moved." }
-        if src.host == dst.host {
-            let s = src.fullPath, d = dst.fullPath
-            if d == s || d.hasPrefix(s + "/") { return "The destination is inside the source folder." }
-            if (s as NSString).deletingLastPathComponent == d { return "That's the folder it's already in." }
+        guard !sources.isEmpty else { return "Tick the folder(s) to \(mode == .copy ? "copy" : "move")." }
+        guard let dst = destination else { return "Open the folder they should go into." }
+        if Set(sources.map(\.host)).count > 1 { return "Pick folders from one NAS at a time." }
+        let names = sources.map(\.displayName)
+        if Set(names).count != names.count { return "Two ticked folders have the same name; they'd land in the same place." }
+        for src in sources {
+            if mode == .move && src.rel.isEmpty { return "Whole shares can't be moved. Pick folders inside “\(src.share.name)”." }
+            if src.host == dst.host {
+                let s = src.fullPath, d = dst.fullPath
+                if d == s || d.hasPrefix(s + "/") { return "The destination is inside “\(src.displayName)”." }
+                if (s as NSString).deletingLastPathComponent == d { return "“\(src.displayName)” is already in that folder." }
+            }
         }
         return nil
     }
 
     private func runPreview() async {
-        guard let source, let destination else { return }
+        guard let destination else { return }
         previewing = true
         error = nil
-        do { preview = try await NAS.preview(src: source, dstParent: destination) } catch { self.error = error.localizedDescription }
+        var results: [(Location, TransferPreview)] = []
+        do {
+            for (i, src) in sources.enumerated() {
+                progressNote = sources.count > 1 ? "Checking \(i + 1) of \(sources.count): \(src.displayName)…" : "Checking \(src.displayName)…"
+                results.append((src, try await NAS.preview(src: src, dstParent: destination)))
+            }
+            previews = results
+        } catch {
+            self.error = error.localizedDescription
+        }
+        progressNote = nil
         previewing = false
     }
 }
 
 struct PreviewSheet: View {
     let mode: TransferMode
-    let source: Location
+    let items: [(Location, TransferPreview)]
     let destination: Location
-    let preview: TransferPreview
     let verify: Bool
     var started: () -> Void
 
@@ -114,6 +136,26 @@ struct PreviewSheet: View {
     @EnvironmentObject var jobs: JobStore
     @State private var starting = false
     @State private var error: String?
+
+    /// All folders' previews combined; paths are prefixed with the folder name when there are several.
+    private var preview: TransferPreview {
+        var p = TransferPreview()
+        let prefix = items.count > 1
+        for (src, pv) in items {
+            func pre(_ list: [PreviewItem]) -> [PreviewItem] {
+                prefix ? list.map { PreviewItem(path: src.displayName + "/" + $0.path, size: $0.size) } : list
+            }
+            p.newFiles += pre(pv.newFiles)
+            p.updatedFiles += pre(pv.updatedFiles)
+            p.skippedNewer += pre(pv.skippedNewer)
+            p.totalItems += pv.totalItems
+            p.totalBytes += pv.totalBytes
+            p.freeBytes = pv.freeBytes
+        }
+        return p
+    }
+    private var sources: [Location] { items.map(\.0) }
+    private var sourceHost: HostID { sources[0].host }
 
     private var notEnoughSpace: Bool {
         guard let free = preview.freeBytes else { return false }
@@ -124,8 +166,13 @@ struct PreviewSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("\(mode.rawValue) preview").font(.title2.bold())
             VStack(alignment: .leading, spacing: 2) {
-                Text("From  " + source.breadcrumb)
-                Text("To      " + destination.child(source.displayName).breadcrumb)
+                if sources.count == 1 {
+                    Text("From  " + sources[0].breadcrumb)
+                    Text("To      " + destination.child(sources[0].displayName).breadcrumb)
+                } else {
+                    Text("From  \(sources.count) folders on the \(sourceHost.name): " + sources.map(\.displayName).joined(separator: ", ")).lineLimit(3)
+                    Text("To      " + destination.breadcrumb)
+                }
             }
             .font(.callout).textSelection(.enabled)
 
@@ -153,11 +200,11 @@ struct PreviewSheet: View {
                 Label("Not enough free space on \(destination.host.name) (keeping a 50 GB cushion).", systemImage: "xmark.octagon.fill").foregroundStyle(.red)
             }
             if verify {
-                Label("Checksums are saved as an ASC MHL manifest in “\(source.displayName)/ascmhl”. Use Verify to re-check the copy any time.", systemImage: "checkmark.seal")
+                Label("Checksums are saved as an ASC MHL manifest in each copied folder's “ascmhl” folder. Use Verify to re-check a copy any time.", systemImage: "checkmark.seal")
                     .foregroundStyle(.secondary)
             }
             if mode == .move {
-                Label("After every file is verified, the original folder moves to \(source.host.name)'s recycle bin (\(source.share.name) › NAS Mover). Nothing is permanently deleted.", systemImage: "trash")
+                Label("After every file is verified, the original folder\(sources.count == 1 ? "" : "s") move\(sources.count == 1 ? "s" : "") to the \(sourceHost.name)'s recycle bin (under “NAS Mover”). Nothing is permanently deleted.", systemImage: "trash")
                     .foregroundStyle(.secondary)
             }
             if preview.filesToCopy == 0 && mode == .copy {
@@ -204,13 +251,16 @@ struct PreviewSheet: View {
     private func start() async {
         starting = true
         let id = NAS.newJobID(mode.rawValue.lowercased())
-        let dstLoc = destination.child(source.displayName)
-        var job = JobSpec(id: id, title: "\(mode.rawValue): \(source.breadcrumb)  →  \(destination.host.name) › \(destination.share.name)\(destination.rel.isEmpty ? "" : " › " + destination.rel)",
-                          runner: NAS.runner(source.host, destination.host))
-        job.copies = [CopyStep(from: source, to: dstLoc.fullPath, toHost: destination.host, list: nil,
-                               backup: dstLoc.recycleDir(job: id), update: true)]
-        if mode == .move, let parent = source.parent {
-            job.recycles = [RecycleStep(host: source.host, root: source.fullPath, dest: parent.recycleDir(job: id), list: nil)]
+        let what = sources.count == 1 ? sources[0].breadcrumb : "\(sources.count) folders from \(sourceHost.name)"
+        var job = JobSpec(id: id, title: "\(mode.rawValue): \(what)  →  \(destination.breadcrumb)",
+                          runner: NAS.runner(sourceHost, destination.host))
+        for src in sources {
+            let dstLoc = destination.child(src.displayName)
+            job.copies.append(CopyStep(from: src, to: dstLoc.fullPath, toHost: destination.host, list: nil,
+                                       backup: dstLoc.recycleDir(job: id), update: true))
+            if mode == .move, let parent = src.parent {
+                job.recycles.append(RecycleStep(host: src.host, root: src.fullPath, dest: parent.recycleDir(job: id), list: nil))
+            }
         }
         job.verify = verify
         job.totalFiles = preview.filesToCopy

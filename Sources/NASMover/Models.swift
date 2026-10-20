@@ -118,6 +118,7 @@ struct JobInfo: Identifiable, Hashable {
     var finished: Date?
     var hashedFiles: Int = 0
     var hashTotal: Int = 0
+    var verifyPending: Bool = false
 
     var isRunning: Bool { state == "running" }
     var isHashing: Bool { phase.hasPrefix("Verifying") || phase.hasPrefix("Hashing") }
@@ -137,11 +138,22 @@ func fmtBytes(_ b: Int64) -> String {
 }
 
 func fmtDuration(_ s: Double) -> String {
-    if s < 60 { return "under a minute" }
+    if s < 60 { return "\(Int(s)) s" }
     let m = Int(s / 60)
+    if m < 10 { return "\(m) min \(Int(s) % 60) s" }
     if m < 60 { return "\(m) min" }
     let h = m / 60
     return h < 48 ? "\(h) h \(m % 60) min" : "\(h / 24) days \(h % 24) h"
+}
+
+struct LiveStats {
+    var hashing: Bool
+    var done: Double
+    var total: Double
+    var elapsed: Double
+    var rate: Double?
+    var remaining: Double?
+    var fraction: Double { total > 0 ? min(1, done / total) : 0 }
 }
 
 /// Rough time estimate from the 2026-10-19 benchmarks: ~200 MB/s for big files, ~200 files/s for small ones.

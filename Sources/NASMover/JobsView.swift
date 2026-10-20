@@ -44,22 +44,8 @@ struct JobRow: View {
                 Spacer()
                 Text(job.host.name).font(.caption).foregroundStyle(.secondary)
             }
-            if (job.isRunning || job.state == "starting") && job.isHashing && job.hashTotal > 0 {
-                ProgressView(value: Double(job.hashedFiles), total: Double(job.hashTotal))
-                HStack {
-                    Text(job.phase)
-                    Spacer()
-                    Text("\(job.hashedFiles.formatted()) of \(job.hashTotal.formatted()) files checksummed").monospacedDigit()
-                }
-                .font(.callout).foregroundStyle(.secondary)
-            } else if job.isRunning || job.state == "starting" {
-                ProgressView(value: job.fraction)
-                HStack {
-                    Text(job.phase.isEmpty ? "Starting…" : job.phase)
-                    Spacer()
-                    Text(progressText).monospacedDigit()
-                }
-                .font(.callout).foregroundStyle(.secondary)
+            if job.isRunning || job.state == "starting" {
+                LiveProgress(job: job, stats: store.stats(job))
             } else {
                 HStack {
                     Text(job.result.isEmpty ? job.state : job.result)
@@ -104,17 +90,6 @@ struct JobRow: View {
         return Image(systemName: icon).foregroundStyle(color)
     }
 
-    private var progressText: String {
-        var parts = ["\(job.doneFiles.formatted()) of \(job.totalFiles.formatted()) files",
-                     "\(fmtBytes(job.doneBytes)) of \(fmtBytes(job.totalBytes))"]
-        if let r = job.rate {
-            parts.append("\(fmtBytes(Int64(r)))/s")
-            let remaining = Double(max(0, job.totalBytes - job.doneBytes)) / r
-            if job.totalBytes > job.doneBytes { parts.append("about \(fmtDuration(remaining)) left") }
-        }
-        return parts.joined(separator: " · ")
-    }
-
     private var summaryText: String {
         var parts = ["\(job.doneFiles.formatted()) files · \(fmtBytes(job.doneBytes))"]
         if let s = job.started, let f = job.finished { parts.append(fmtDuration(f.timeIntervalSince(s))) }
@@ -146,6 +121,100 @@ struct LogSheet: View {
         .frame(width: 760, height: 520)
         .task {
             do { text = try await NAS.log(job) } catch { text = error.localizedDescription }
+        }
+    }
+}
+
+/// Sent / left, elapsed / remaining, speed and file count for a running job.
+struct LiveProgress: View {
+    let job: JobInfo
+    let stats: LiveStats
+    var compact = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(job.phase.isEmpty ? "Starting…" : job.phase).font(.callout.weight(.medium))
+                Spacer()
+                Text(stats.fraction.formatted(.percent.precision(.fractionLength(0)))).font(.callout.weight(.semibold)).monospacedDigit()
+            }
+            ProgressView(value: stats.fraction).progressViewStyle(.linear)
+            if compact {
+                Text(compactLine).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            } else {
+                Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 4) {
+                    if stats.hashing {
+                        GridRow {
+                            cell("Checksummed (both NASes)", "\(Int(stats.done).formatted()) of \(Int(stats.total).formatted()) files")
+                            cell("Left", "\(Int(max(0, stats.total - stats.done)).formatted()) files")
+                            cell("Speed", stats.rate.map { "\(Int($0).formatted()) files/s" } ?? "measuring…")
+                        }
+                    } else {
+                        GridRow {
+                            cell("Sent", "\(fmtBytes(Int64(stats.done))) of \(fmtBytes(Int64(stats.total)))")
+                            cell("Left", fmtBytes(Int64(max(0, stats.total - stats.done))))
+                            cell("Speed", stats.rate.map { "\(fmtBytes(Int64($0)))/s" } ?? "measuring…")
+                        }
+                    }
+                    GridRow {
+                        cell("Elapsed", fmtDuration(stats.elapsed))
+                        cell("Remaining", stats.remaining.map { "about " + fmtDuration($0) } ?? "—")
+                        cell("Files copied", "\(job.doneFiles.formatted()) of \(job.totalFiles.formatted())")
+                    }
+                }
+                if job.phase.hasPrefix("Copying"), job.verifyPending {
+                    Text("After copying, every file is checksummed on both NASes (roughly as long again).")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var compactLine: String {
+        var parts: [String] = []
+        if stats.hashing {
+            parts.append("\(Int(stats.done).formatted()) of \(Int(stats.total).formatted()) files checksummed")
+            if let r = stats.rate { parts.append("\(Int(r)) files/s") }
+        } else {
+            parts.append("\(fmtBytes(Int64(stats.done))) of \(fmtBytes(Int64(stats.total)))")
+            if let r = stats.rate { parts.append("\(fmtBytes(Int64(r)))/s") }
+        }
+        parts.append(fmtDuration(stats.elapsed) + " elapsed")
+        if let rem = stats.remaining { parts.append("about \(fmtDuration(rem)) left") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func cell(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.callout).monospacedDigit()
+        }
+    }
+}
+
+/// Running jobs, pinned to the bottom of every screen.
+struct ActiveJobsBar: View {
+    @EnvironmentObject var store: JobStore
+    var showJobs: () -> Void
+
+    var body: some View {
+        let running = store.jobs.filter { $0.isRunning || $0.state == "starting" }
+        if !running.isEmpty {
+            VStack(spacing: 8) {
+                ForEach(running) { job in
+                    HStack(alignment: .center, spacing: 12) {
+                        Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.blue)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(job.title).font(.caption.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                            LiveProgress(job: job, stats: store.stats(job), compact: true)
+                        }
+                        Button("Details", action: showJobs).controlSize(.small)
+                    }
+                }
+            }
+            .padding(12)
+            .background(.bar)
+            .overlay(alignment: .top) { Divider() }
         }
     }
 }

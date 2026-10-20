@@ -78,17 +78,25 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)
             .safeAreaInset(edge: .bottom) { ConnectionStatus().padding(10) }
         } detail: {
+            detail
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if section != .jobs { ActiveJobsBar(showJobs: { section = .jobs }) }
+                }
+        }
+        .sheet(isPresented: $showSetup) { SetupView { showSetup = false } }
+        .onReceive(NotificationCenter.default.publisher(for: .showSetup)) { _ in showSetup = true }
+        .task { await shares.loadIfNeeded() }
+        .task { await jobs.pollForever() }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
             switch section ?? .transfer {
             case .transfer: TransferView(showJobs: { section = .jobs })
             case .unify: UnifyView(showJobs: { section = .jobs })
             case .verify: VerifyView(showJobs: { section = .jobs })
             case .jobs: JobsView()
             }
-        }
-        .sheet(isPresented: $showSetup) { SetupView { showSetup = false } }
-        .onReceive(NotificationCenter.default.publisher(for: .showSetup)) { _ in showSetup = true }
-        .task { await shares.loadIfNeeded() }
-        .task { await jobs.pollForever() }
     }
 }
 
@@ -156,6 +164,8 @@ final class ShareStore: ObservableObject {
 final class JobStore: ObservableObject {
     @Published var jobs: [JobInfo] = []
     @Published var error: String?
+    /// Recent (time, amount) samples per running job and phase, for a speed that reflects the last ~30 s.
+    private var samples: [String: [(Date, Double)]] = [:]
     var runningCount: Int { jobs.filter { $0.isRunning || $0.state == "starting" }.count }
 
     func refresh() async {
@@ -176,13 +186,38 @@ final class JobStore: ObservableObject {
             }
         }
         jobs = all.sorted { $0.id > $1.id }
+        let now = Date()
+        for j in jobs where j.isRunning {
+            let key = j.id + (j.isHashing ? "#hash" : "#copy")
+            var s = samples[key] ?? []
+            s.append((now, j.isHashing ? Double(j.hashedFiles) : Double(j.doneBytes)))
+            s.removeAll { now.timeIntervalSince($0.0) > 30 }
+            samples[key] = s
+        }
         error = errs.isEmpty ? nil : errs.joined(separator: "\n")
+    }
+
+    /// Live numbers for a running job (bytes while copying, files while checksumming).
+    func stats(_ j: JobInfo) -> LiveStats {
+        let hashing = j.isHashing && j.hashTotal > 0
+        let done = hashing ? Double(j.hashedFiles) : Double(j.doneBytes)
+        let total = hashing ? Double(j.hashTotal) : Double(max(j.totalBytes, j.doneBytes))
+        let elapsed = j.started.map { (j.finished ?? Date()).timeIntervalSince($0) } ?? 0
+        var rate: Double?
+        if let s = samples[j.id + (hashing ? "#hash" : "#copy")], let first = s.first, let last = s.last,
+           last.0.timeIntervalSince(first.0) >= 4, last.1 > first.1 {
+            rate = (last.1 - first.1) / last.0.timeIntervalSince(first.0)
+        } else if !hashing, let r = j.rate {
+            rate = r
+        }
+        let remaining = rate.flatMap { $0 > 0 && total > done ? (total - done) / $0 : nil }
+        return LiveStats(hashing: hashing, done: done, total: total, elapsed: elapsed, rate: rate, remaining: remaining)
     }
 
     func pollForever() async {
         while !Task.isCancelled {
             await refresh()
-            let delay: UInt64 = runningCount > 0 ? 2 : 10
+            let delay: UInt64 = runningCount > 0 ? 2 : 8
             try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
         }
     }

@@ -24,7 +24,9 @@ cd "$J" || exit 1
 
 echo $$ > pid
 RSH="ssh -o BatchMode=yes -o ServerAliveInterval=30 -c aes128-gcm@openssh.com"
-RS="rsync -rlt -s --exclude-from=$EXCLUDES"
+# --whole-file: on a LAN, sending whole files beats rsync's delta algorithm.
+# --progress: lets update_progress count bytes inside files that are still copying.
+RS="rsync -rlt -s -W --progress --exclude-from=$EXCLUDES"
 TAB=$(printf '\t')
 
 say() { echo "$*" > phase; echo "$(date '+%F %T') $*" >> events.log; }
@@ -44,11 +46,22 @@ spec() { # host path -> rsync path
 on() { # host; runs the script on stdin there
 	if [ "$1" = "$RUNNER" ]; then sh -s; else $RSH "$UNAS_SSH" sh -s; fi
 }
+# progress = "<files done> <bytes done>", including the part of each worker's current file already sent.
+# Each worker log interleaves our --out-format lines (flags|size|path) with rsync's \r-separated --progress lines.
 update_progress() {
-	cat log.* 2>/dev/null | awk -F'|' '$1 ~ /^[<>]f/ { n++; b += $2 } END { printf "%d %.0f\n", n, b }' > progress.tmp && mv progress.tmp progress
+	for f in log.*; do
+		[ -f "$f" ] || continue
+		tr '\r' '\n' < "$f" | awk -F'|' '
+			NF >= 3 && $1 ~ /^[<>]f/ { if (pend) { done += cur; n++ } cur = $2; pend = 1; part = 0; next }
+			/^ *[0-9]+ +[0-9]+%/ {
+				split($0, a, " "); part = a[1]
+				if ($0 ~ / 100%/ || $0 ~ /xfer#/) { if (pend) { done += cur; n++ } pend = 0 }
+			}
+			END { if (pend) done += part; printf "%d %.0f\n", n, done }'
+	done | awk '{ n += $1; b += $2 } END { printf "%d %.0f\n", n, b }' > progress.tmp && mv progress.tmp progress
 	cat hashraw.* 2>/dev/null | awk '$1 == "H" { h++ } $1 == "T" { t += $2 } END { printf "%d %d\n", h, t }' > hprogress.tmp && mv hprogress.tmp hprogress
 }
-progress_loop() { while :; do update_progress; sleep 3; done; }
+progress_loop() { while :; do update_progress; sleep 2; done; }
 
 fix_unas_perms() { # path on the UNAS: hand root-written items to the UniFi Drive owner
 	{

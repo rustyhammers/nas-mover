@@ -65,8 +65,9 @@ enum NAS {
             throw SSHError(message: "App resources are missing (runner.sh / excludes.txt).")
         }
         let t = target(h)
-        _ = try await SSH.check(t, "mkdir -p ~/.nasmover/jobs ~/.nasmover/tmp && cat > ~/.nasmover/runner.sh", stdin: try Data(contentsOf: runner))
-        _ = try await SSH.check(t, "cat > ~/.nasmover/excludes.txt", stdin: try Data(contentsOf: excludes))
+        // Write to a temp file and rename: a running job keeps reading its own copy of the old script.
+        _ = try await SSH.check(t, "mkdir -p ~/.nasmover/jobs ~/.nasmover/tmp && cat > ~/.nasmover/runner.sh.new && mv ~/.nasmover/runner.sh.new ~/.nasmover/runner.sh", stdin: try Data(contentsOf: runner))
+        _ = try await SSH.check(t, "cat > ~/.nasmover/excludes.txt.new && mv ~/.nasmover/excludes.txt.new ~/.nasmover/excludes.txt", stdin: try Data(contentsOf: excludes))
         let home = try await SSH.check(t, "echo $HOME").trimmingCharacters(in: .whitespacesAndNewlines)
         homes[h] = home
         return home
@@ -246,10 +247,10 @@ enum NAS {
         for d in */; do
           d=${d%/}
           [ -f "$d/job.env" ] || continue
-          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$(cat "$d/title" 2>/dev/null)" "$(cat "$d/state" 2>/dev/null)" \
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$(cat "$d/title" 2>/dev/null)" "$(cat "$d/state" 2>/dev/null)" \
             "$(cat "$d/phase" 2>/dev/null)" "$(cat "$d/result" 2>/dev/null)" "$(cat "$d/progress" 2>/dev/null)" \
             "$(cat "$d/total" 2>/dev/null)" "$(cat "$d/started" 2>/dev/null)" "$(cat "$d/finished" 2>/dev/null)" \
-            "$(cat "$d/hprogress" 2>/dev/null)"
+            "$(cat "$d/hprogress" 2>/dev/null)" "$(grep -c "^VERIFY='1'" "$d/job.env" 2>/dev/null)"
         done
         """#
         let out = try await SSH.check(target(h), "sh -s", stdin: Data(script.utf8))
@@ -270,7 +271,8 @@ enum NAS {
                 totalFiles: Int(tot.first ?? "") ?? 0, totalBytes: Int64(tot.dropFirst().first ?? "") ?? 0,
                 started: Double(c[7]).map { Date(timeIntervalSince1970: $0) },
                 finished: Double(c[8]).map { Date(timeIntervalSince1970: $0) },
-                hashedFiles: Int(hp.first ?? "") ?? 0, hashTotal: Int(hp.dropFirst().first ?? "") ?? 0
+                hashedFiles: Int(hp.first ?? "") ?? 0, hashTotal: Int(hp.dropFirst().first ?? "") ?? 0,
+                verifyPending: c.count > 10 && c[10] == "1"
             )
         }
     }
