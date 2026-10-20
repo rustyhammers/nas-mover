@@ -1,0 +1,4 @@
+.build/
+NAS Mover.app/
+dist/
+.DS_Store

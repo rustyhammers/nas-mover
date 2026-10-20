@@ -1,0 +1,17 @@
+name: Build
+
+# Catches build breaks on every push before anything is released.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: UNIVERSAL=1 ./build.sh
+      - name: Check the job runner script parses
+        run: sh -n Resources/runner.sh

@@ -1,0 +1,12 @@
+@Recycle/
+.@__thumb/
+.@upload_cache/
+.@__qini/
+.trashcan/
+.TemporaryItems/
+.Trashes/
+.Spotlight-V100/
+.fseventsd/
+.DS_Store
+._*
+Thumbs.db
