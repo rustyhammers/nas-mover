@@ -103,7 +103,7 @@ struct TransferPreview {
     var filesToCopy: Int { newFiles.count + updatedFiles.count }
 }
 
-struct JobInfo: Identifiable, Hashable {
+struct JobInfo: Identifiable {
     var id: String
     var host: HostID
     var title: String
@@ -119,6 +119,8 @@ struct JobInfo: Identifiable, Hashable {
     var hashedFiles: Int = 0
     var hashTotal: Int = 0
     var verifyPending: Bool = false
+    /// Checksum progress per NAS: (host, bytes checked, bytes to check).
+    var verifySides: [(host: HostID, done: Int64, total: Int64)] = []
 
     var isRunning: Bool { state == "running" }
     var isHashing: Bool { phase.hasPrefix("Verifying") || phase.hasPrefix("Hashing") }
@@ -148,6 +150,7 @@ func fmtDuration(_ s: Double) -> String {
 
 struct LiveStats {
     var hashing: Bool
+    var byBytes: Bool = true
     var done: Double
     var total: Double
     var elapsed: Double

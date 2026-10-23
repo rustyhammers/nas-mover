@@ -60,6 +60,15 @@ update_progress() {
 			END { if (pend) done += part; printf "%d %.0f\n", n, done }'
 	done | awk '{ n += $1; b += $2 } END { printf "%d %.0f\n", n, b }' > progress.tmp && mv progress.tmp progress
 	cat hashraw.* 2>/dev/null | awk '$1 == "H" { h++ } $1 == "T" { t += $2 } END { printf "%d %d\n", h, t }' > hprogress.tmp && mv hprogress.tmp hprogress
+	# hbytes = "host:hashed:total" per NAS, by data rather than file count (one big file can take minutes).
+	for r in hashraw.*; do
+		[ -f "$r" ] || continue
+		tag=${r#hashraw.}
+		awk -v host="$(cat hhost.$tag 2>/dev/null)" '
+			$1 == "S" { p = $0; sub(/^S [0-9]+ [0-9]+ /, "", p); sz[p] = $2; all += $2; next }
+			$1 == "H" { l = substr($0, 3); if (substr(l, 1, 1) == "\\") l = substr(l, 2); hb += sz[substr(l, 35)] }
+			END { printf "%s %.0f %.0f\n", host, hb, all }' "$r"
+	done | awk '{ h[$1] += $2; t[$1] += $3 } END { for (k in h) printf "%s:%.0f:%.0f\n", k, h[k], t[k] }' | tr '\n' ',' > hbytes.tmp && mv hbytes.tmp hbytes
 }
 progress_loop() { while :; do update_progress; sleep 2; done; }
 
@@ -139,6 +148,7 @@ copy_op() {
 # Writes hash.<tag> (md5 TAB path) and stat.<tag> (size TAB mtime TAB path).
 # Returns 1 if any file couldn't be hashed.
 hash_tree() {
+	echo "$1" > hhost.$3
 	{
 		printf 'R=%s\nN=%s\nL=/tmp/nasmover.$$.list\n' "$(q "$2")" "$STREAMS"
 		if [ -n "$4" ]; then
@@ -157,9 +167,14 @@ fi
 echo "T $(wc -l < "$L" | tr -d ' ')"
 tr '\n' '\0' < "$L" | xargs -0 stat -c 'S %s %Y %n'
 awk -v n="$N" -v pre="$L.c." '{ f = pre "" (NR % n); print > f }' "$L"
+# Report each checksum as soon as it's done: GNU md5sum and mawk otherwise hold output in large buffers.
+SB=""
+command -v stdbuf >/dev/null 2>&1 && SB="stdbuf -oL"
+AWKI="awk"
+awk -W interactive 'BEGIN {}' </dev/null >/dev/null 2>&1 && AWKI="awk -W interactive"
 for c in "$L".c.*; do
 	[ -f "$c" ] || continue
-	tr '\n' '\0' < "$c" | xargs -0 md5sum | awk '{ print "H " $0; fflush() }' &
+	tr '\n' '\0' < "$c" | xargs -0 $SB md5sum | $AWKI '{ print "H " $0; fflush() }' &
 done
 wait
 rm -f "$L" "$L".c.*

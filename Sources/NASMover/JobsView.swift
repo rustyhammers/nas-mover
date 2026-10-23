@@ -143,7 +143,14 @@ struct LiveProgress: View {
                 Text(compactLine).font(.caption).foregroundStyle(.secondary).monospacedDigit()
             } else {
                 Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 4) {
-                    if stats.hashing {
+                    if stats.hashing && !job.verifySides.isEmpty {
+                        GridRow {
+                            ForEach(job.verifySides, id: \.host) { side in
+                                cell("\(side.host.name) checked", "\(fmtBytes(side.done)) of \(fmtBytes(side.total)) (\(side.total > 0 ? Int(Double(side.done) / Double(side.total) * 100) : 0)%)")
+                            }
+                            cell("Speed (slower NAS)", stats.rate.map { "\(fmtBytes(Int64($0)))/s" } ?? "measuring…")
+                        }
+                    } else if stats.hashing {
                         GridRow {
                             cell("Checksummed (both NASes)", "\(Int(stats.done).formatted()) of \(Int(stats.total).formatted()) files")
                             cell("Left", "\(Int(max(0, stats.total - stats.done)).formatted()) files")
@@ -172,7 +179,9 @@ struct LiveProgress: View {
 
     private var compactLine: String {
         var parts: [String] = []
-        if stats.hashing {
+        if stats.hashing && !job.verifySides.isEmpty {
+            parts.append("Verifying: " + job.verifySides.map { "\($0.host.name) \($0.total > 0 ? Int(Double($0.done) / Double($0.total) * 100) : 0)%" }.joined(separator: " · "))
+        } else if stats.hashing {
             parts.append("\(Int(stats.done).formatted()) of \(Int(stats.total).formatted()) files checksummed")
             if let r = stats.rate { parts.append("\(Int(r)) files/s") }
         } else {

@@ -190,7 +190,8 @@ final class JobStore: ObservableObject {
         for j in jobs where j.isRunning {
             let key = j.id + (j.isHashing ? "#hash" : "#copy")
             var s = samples[key] ?? []
-            s.append((now, j.isHashing ? Double(j.hashedFiles) : Double(j.doneBytes)))
+            let slow = j.verifySides.filter { $0.total > 0 }.min { Double($0.done) / Double($0.total) < Double($1.done) / Double($1.total) }
+            s.append((now, j.isHashing ? (slow.map { Double($0.done) } ?? Double(j.hashedFiles)) : Double(j.doneBytes)))
             s.removeAll { now.timeIntervalSince($0.0) > 30 }
             samples[key] = s
         }
@@ -199,9 +200,11 @@ final class JobStore: ObservableObject {
 
     /// Live numbers for a running job (bytes while copying, files while checksumming).
     func stats(_ j: JobInfo) -> LiveStats {
-        let hashing = j.isHashing && j.hashTotal > 0
-        let done = hashing ? Double(j.hashedFiles) : Double(j.doneBytes)
-        let total = hashing ? Double(j.hashTotal) : Double(max(j.totalBytes, j.doneBytes))
+        let hashing = j.isHashing && (j.hashTotal > 0 || !j.verifySides.isEmpty)
+        // Verification finishes when the slower NAS does, so track that side's bytes.
+        let slow = j.verifySides.filter { $0.total > 0 }.min { Double($0.done) / Double($0.total) < Double($1.done) / Double($1.total) }
+        let done = hashing ? (slow.map { Double($0.done) } ?? Double(j.hashedFiles)) : Double(j.doneBytes)
+        let total = hashing ? (slow.map { Double($0.total) } ?? Double(j.hashTotal)) : Double(max(j.totalBytes, j.doneBytes))
         let elapsed = j.started.map { (j.finished ?? Date()).timeIntervalSince($0) } ?? 0
         var rate: Double?
         if let s = samples[j.id + (hashing ? "#hash" : "#copy")], let first = s.first, let last = s.last,
@@ -211,7 +214,7 @@ final class JobStore: ObservableObject {
             rate = r
         }
         let remaining = rate.flatMap { $0 > 0 && total > done ? (total - done) / $0 : nil }
-        return LiveStats(hashing: hashing, done: done, total: total, elapsed: elapsed, rate: rate, remaining: remaining)
+        return LiveStats(hashing: hashing, byBytes: !hashing || slow != nil, done: done, total: total, elapsed: elapsed, rate: rate, remaining: remaining)
     }
 
     func pollForever() async {

@@ -248,10 +248,10 @@ enum NAS {
         for d in */; do
           d=${d%/}
           [ -f "$d/job.env" ] || continue
-          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$(cat "$d/title" 2>/dev/null)" "$(cat "$d/state" 2>/dev/null)" \
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$(cat "$d/title" 2>/dev/null)" "$(cat "$d/state" 2>/dev/null)" \
             "$(cat "$d/phase" 2>/dev/null)" "$(cat "$d/result" 2>/dev/null)" "$(cat "$d/progress" 2>/dev/null)" \
             "$(cat "$d/total" 2>/dev/null)" "$(cat "$d/started" 2>/dev/null)" "$(cat "$d/finished" 2>/dev/null)" \
-            "$(cat "$d/hprogress" 2>/dev/null)" "$(grep -c "^VERIFY='1'" "$d/job.env" 2>/dev/null)"
+            "$(cat "$d/hprogress" 2>/dev/null)" "$(grep -c "^VERIFY='1'" "$d/job.env" 2>/dev/null)" "$(cat "$d/hbytes" 2>/dev/null)"
         done
         """#
         let out = try await SSH.check(target(h), "sh -s", stdin: Data(script.utf8))
@@ -273,7 +273,12 @@ enum NAS {
                 started: Double(c[7]).map { Date(timeIntervalSince1970: $0) },
                 finished: Double(c[8]).map { Date(timeIntervalSince1970: $0) },
                 hashedFiles: Int(hp.first ?? "") ?? 0, hashTotal: Int(hp.dropFirst().first ?? "") ?? 0,
-                verifyPending: c.count > 10 && c[10] == "1"
+                verifyPending: c.count > 10 && c[10] == "1",
+                verifySides: c.count > 11 ? c[11].split(separator: ",").compactMap { part in
+                    let f = part.split(separator: ":")
+                    guard f.count == 3, let h = HostID(rawValue: String(f[0])), let d = Int64(f[1]), let t = Int64(f[2]) else { return nil }
+                    return (h, d, t)
+                }.sorted { $0.host.rawValue < $1.host.rawValue } : []
             )
         }
     }
