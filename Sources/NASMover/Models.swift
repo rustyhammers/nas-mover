@@ -48,8 +48,11 @@ struct Share: Hashable, Identifiable {
     var name: String
     /// Filesystem path of the share's root (what SMB shows).
     var path: String
-    /// Where this share's recycle bin lives.
-    var recycleRoot: String
+    /// Where NAS Mover keeps originals and replaced files: a plain folder at the share's root.
+    /// Not the NAS's own recycle bin, which empties itself by file age (QNAP purged a Move's
+    /// originals hours after it finished because the footage was older than its 180-day limit).
+    var recycleRoot: String { path + "/" + Share.recycleFolder }
+    static let recycleFolder = "_NAS Mover Recycle"
     var id: String { host.rawValue + ":" + name }
 
     /// Name with spaces/case removed, used to match the same share across NASes.
@@ -75,7 +78,7 @@ struct Location: Hashable {
     }
     /// Recycle-bin folder for a job, mirroring this location's path.
     func recycleDir(job: String) -> String {
-        let base = share.recycleRoot + "/NAS Mover/" + job
+        let base = share.recycleRoot + "/" + job
         return rel.isEmpty ? base : base + "/" + rel
     }
 }

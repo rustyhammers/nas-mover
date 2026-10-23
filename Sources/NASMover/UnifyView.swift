@@ -255,7 +255,7 @@ struct UnifyView: View {
 
     private var setup: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Compare two copies of the same folder, review every difference, then make both sides match. Nothing changes until you approve the plan, and anything replaced or removed goes to that NAS's recycle bin.")
+            Text("Compare two copies of the same folder, review every difference, then make both sides match. Nothing changes until you approve the plan, and anything replaced or removed goes to that share's “_NAS Mover Recycle” folder.")
                 .foregroundStyle(.secondary)
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading) {
@@ -412,7 +412,7 @@ struct UnifyView: View {
                 }
             }
         } message: {
-            Text(planSummary(plan, A, B) + "\n\nEvery copied file is verified. Anything overwritten or recycled goes to that NAS's recycle bin under “NAS Mover”.")
+            Text(planSummary(plan, A, B) + "\n\nEvery copied file is verified. Anything overwritten or recycled goes to that share's “_NAS Mover Recycle” folder.")
         }
     }
 

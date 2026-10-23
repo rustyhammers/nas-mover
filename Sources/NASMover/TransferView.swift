@@ -85,7 +85,7 @@ struct TransferView: View {
     private var modeExplanation: String {
         switch mode {
         case .copy: return "Copies the ticked folders. Nothing at the source is touched. Newer files at the destination are never overwritten."
-        case .move: return "Copies, verifies every file with MD5, then moves the originals to the source NAS's recycle bin."
+        case .move: return "Copies, verifies every file with MD5, then moves the originals into the share's “_NAS Mover Recycle” folder for you to delete when you're happy."
         }
     }
 
@@ -179,9 +179,9 @@ struct PreviewSheet: View {
             Form {
                 row("New files", preview.newFiles, color: .green)
                 row("Will be updated (source is newer)", preview.updatedFiles, color: .blue,
-                    note: "The older destination copies are kept in the destination's recycle bin.")
+                    note: "The older destination copies are kept in the destination share's “_NAS Mover Recycle” folder.")
                 row("Skipped (destination is newer)", preview.skippedNewer, color: .orange,
-                    note: mode == .move ? "These stay as they are at the destination. The source versions go to the recycle bin with the rest of the folder." : "These are left alone.")
+                    note: mode == .move ? "These stay as they are at the destination. The source versions go to “_NAS Mover Recycle” with the rest of the folder." : "These are left alone.")
                 LabeledContent("To copy") {
                     Text("\(preview.filesToCopy.formatted()) files · \(fmtBytes(preview.bytesToCopy))")
                 }
@@ -204,7 +204,7 @@ struct PreviewSheet: View {
                     .foregroundStyle(.secondary)
             }
             if mode == .move {
-                Label("After every file is verified, the original folder\(sources.count == 1 ? "" : "s") move\(sources.count == 1 ? "s" : "") to the \(sourceHost.name)'s recycle bin (under “NAS Mover”). Nothing is permanently deleted.", systemImage: "trash")
+                Label("After every file is verified, the original folder\(sources.count == 1 ? "" : "s") move\(sources.count == 1 ? "s" : "") into “\(sources[0].share.name) › _NAS Mover Recycle”. Nothing is deleted: empty that folder yourself once you've checked the copy.", systemImage: "trash")
                     .foregroundStyle(.secondary)
             }
             if preview.filesToCopy == 0 && mode == .copy {

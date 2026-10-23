@@ -84,8 +84,8 @@ EOS
 	} | on unas
 }
 
-bin_root() { # ".../.trashcan/NAS Mover/<job>/..." -> ".../.trashcan", so folders mkdir created get fixed too
-	printf '%s' "${1%%/NAS Mover/*}"
+bin_root() { # ".../_NAS Mover Recycle/<job>/..." -> ".../_NAS Mover Recycle", so folders mkdir created get fixed too
+	printf '%s/_NAS Mover Recycle' "${1%%/_NAS Mover Recycle/*}"
 }
 
 load_copy() {
@@ -160,7 +160,7 @@ hash_tree() {
 		cat <<'EOS'
 cd "$R" || exit 1
 if [ -n "$FIND" ]; then
-	find . \( -name @Recycle -o -name .@__thumb -o -name .@upload_cache -o -name .@__qini -o -name .trashcan \
+	find . \( -name @Recycle -o -name "_NAS Mover Recycle" -o -name .@__thumb -o -name .@upload_cache -o -name .@__qini -o -name .trashcan \
 		-o -name .TemporaryItems -o -name .Trashes -o -name .Spotlight-V100 -o -name .fseventsd -o -name ascmhl \) -prune \
 		-o -type f ! -name .DS_Store ! -name '._*' ! -name Thumbs.db -print | sed 's|^\./||' > "$L"
 fi
@@ -285,6 +285,7 @@ write_mhl() {
 			print "    <ignore>"
 			n = split(".DS_Store ascmhl ascmhl/ ._* Thumbs.db @Recycle .@__thumb .trashcan .TemporaryItems .Trashes .Spotlight-V100 .fseventsd", ig, " ")
 			for (i = 1; i <= n; i++) print "      <pattern>" esc(ig[i]) "</pattern>"
+			print "      <pattern>_NAS Mover Recycle</pattern>"
 			print "    </ignore>"
 			print "  </processinfo>"
 			print "  <hashes>"
@@ -474,7 +475,7 @@ fi
 
 n=1
 while eval "[ -n \"\$RECYCLE${n}_HOST\" ]"; do
-	say "Moving originals to the recycle bin"
+	say "Moving originals to _NAS Mover Recycle"
 	recycle_op $n || finish failed "Recycle step failed"
 	n=$((n + 1))
 done

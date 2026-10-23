@@ -92,11 +92,10 @@ enum NAS {
             switch h {
             case .qnap:
                 if name == "global" || name.hasPrefix("Dev") && name.contains("Partition") || path.hasPrefix("/share/external") { continue }
-                result.append(Share(host: h, name: name, path: path, recycleRoot: path + "/@Recycle"))
+                result.append(Share(host: h, name: name, path: path))
             case .unas:
                 guard path.contains("/.unifi-drive/"), path.hasSuffix("/.data"), !path.contains("%") else { continue }
-                let shareDir = (path as NSString).deletingLastPathComponent
-                result.append(Share(host: h, name: name, path: path, recycleRoot: shareDir + "/.trashcan"))
+                result.append(Share(host: h, name: name, path: path))
             }
             section = nil
         }
@@ -107,7 +106,7 @@ enum NAS {
         let out = try await SSH.check(target(loc.host), "cd \(shq(loc.fullPath)) && find . -mindepth 1 -maxdepth 1 -type d")
         return out.split(separator: "\n")
             .map { String($0.dropFirst(2)) }
-            .filter { !$0.hasPrefix(".") && !$0.hasPrefix("@") && $0 != "#recycle" && $0 != "ascmhl" }
+            .filter { !$0.hasPrefix(".") && !$0.hasPrefix("@") && $0 != "#recycle" && $0 != "ascmhl" && $0 != Share.recycleFolder }
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
@@ -324,7 +323,7 @@ enum NAS {
 
     /// Lists every file under `loc` with size and modification time, keyed by relative path.
     static func index(_ loc: Location) async throws -> [String: FileEntry] {
-        let prune = ["@Recycle", ".@__thumb", ".@upload_cache", ".@__qini", ".trashcan", ".TemporaryItems",
+        let prune = ["@Recycle", Share.recycleFolder, ".@__thumb", ".@upload_cache", ".@__qini", ".trashcan", ".TemporaryItems",
                      ".Trashes", ".Spotlight-V100", ".fseventsd", "ascmhl"]
             .map { "-name \(shq($0))" }.joined(separator: " -o ")
         let cmd = "cd \(shq(loc.fullPath)) && find . \\( \(prune) \\) -prune -o -type f ! -name .DS_Store ! -name '._*' ! -name Thumbs.db -exec stat -c '%s %Y %n' {} +"

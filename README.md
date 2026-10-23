@@ -7,7 +7,7 @@ A Mac app for moving large amounts of data between a **QNAP** NAS and a **UniFi 
 - **Copy / Move:** parallel rsync over SSH, running *on the NAS*. Transfers keep going if the Mac sleeps or the app quits.
 - **Unify:** compare two copies of the same project folder, review every difference, and make both sides match.
 - **Verify:** every copy is checked with MD5 on both sides and recorded as an [ASC MHL](https://theasc.com/society/ascmitc/asc-media-hash-list) manifest (`ascmhl/` inside the folder), the same standard used by Hedge, ShotPut Pro and Silverstack. Re-check any folder later for silent corruption.
-- **Nothing is permanently deleted.** Overwritten or removed files go to the NAS's recycle bin under `NAS Mover/<job>`.
+- **Nothing is permanently deleted.** Originals from a Move, and any files replaced or removed, go to a `_NAS Mover Recycle/<job>` folder at the root of that share. Empty it yourself once you've checked the result. It deliberately isn't the NAS's own recycle bin: QNAP's bin deletes files by age, which would remove old footage within hours.
 
 ## Install
 
@@ -59,7 +59,7 @@ To regenerate the icon, run `swift scripts/make-icon.swift`.
 
 - The app talks to the NASes over SSH. All connections share one multiplexed session per NAS.
 - A job is a folder in `~/.nasmover/jobs/` on the NAS that runs it, driven by `Resources/runner.sh`. The runner is a POSIX/busybox shell script the app uploads, so nothing has to be installed on the NAS.
-- Copies use `rsync -rlt` with AES-GCM SSH and 4 parallel streams. A copy never overwrites a newer destination file (`-u`), and any file it replaces is kept in the recycle bin.
+- Copies use `rsync -rlt` with AES-GCM SSH and 4 parallel streams. A copy never overwrites a newer destination file (`-u`), and any file it replaces is kept in `_NAS Mover Recycle`.
 - Verification MD5s both sides in parallel on each NAS. A Move only recycles the originals after every file matches.
 - Files written to the UNAS are handed to the UniFi Drive owner and group (detected during Setup), so they show up normally over SMB.
 - Each SSH call is logged on the Mac in `~/.nasmover/app.log`.
