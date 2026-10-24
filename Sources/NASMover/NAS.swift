@@ -115,6 +115,13 @@ enum NAS {
         return r.code == 0
     }
 
+    static func volume(_ loc: Location) async throws -> Volume? {
+        let out = try await SSH.check(target(loc.host), "df -Pk \(shq(loc.share.path)) | tail -1")
+        let cols = out.split(separator: " ", omittingEmptySubsequences: true)
+        guard cols.count >= 4, let size = Int64(cols[1]), let free = Int64(cols[3]) else { return nil }
+        return Volume(host: loc.host, id: String(cols[0]), size: size * 1024, free: free * 1024)
+    }
+
     static func freeBytes(_ loc: Location) async throws -> Int64? {
         let out = try await SSH.check(target(loc.host), "df -Pk \(shq(loc.share.path)) | tail -1")
         let cols = out.split(separator: " ", omittingEmptySubsequences: true)
@@ -137,7 +144,8 @@ enum NAS {
         let t = target(runner)
         async let planned = SSH.run(t, cmd(true))
         async let full = SSH.run(t, cmd(false))
-        async let free = freeBytes(dstParent)
+        async let dstVol = volume(dstParent)
+        async let srcVol = volume(src)
         let (p, f) = try await (planned, full)
         for r in [p, f] where !dryRunOK(r) {
             throw SSHError(message: "Preview failed: " + r.err.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -167,7 +175,8 @@ enum NAS {
                 pv.skippedNewer.append(PreviewItem(path: path, size: Int64(parts[1]) ?? 0))
             }
         }
-        pv.freeBytes = try? await free
+        pv.dstVolume = try? await dstVol
+        pv.srcVolume = try? await srcVol
         return pv
     }
 

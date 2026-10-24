@@ -150,12 +150,55 @@ struct PreviewSheet: View {
             p.skippedNewer += pre(pv.skippedNewer)
             p.totalItems += pv.totalItems
             p.totalBytes += pv.totalBytes
-            p.freeBytes = pv.freeBytes
+            p.dstVolume = pv.dstVolume
+            p.srcVolume = p.srcVolume ?? pv.srcVolume
         }
         return p
     }
     private var sources: [Location] { items.map(\.0) }
     private var sourceHost: HostID { sources[0].host }
+
+    /// What the destination volume loses. (Replaced files are kept in _NAS Mover Recycle, so they don't free anything.)
+    private var destinationCost: Int64 { preview.bytesToCopy }
+
+    /// Bytes in the folders being moved, per volume they live on.
+    private var movedBytes: Int64 { items.reduce(0) { $0 + $1.1.totalBytes } }
+
+    private func sourceAfter(_ src: Volume) -> [(String, Int64)] {
+        let sameDisk = preview.dstVolume.map { $0.host == src.host && $0.id == src.id } ?? false
+        let now = sameDisk ? src.free - destinationCost : src.free
+        if mode == .copy {
+            return [(sameDisk ? "After the copy (same disk as destination)" : "After the copy (unchanged)", now)]
+        }
+        return [
+            ("After the move (originals kept in _NAS Mover Recycle)", now),
+            ("After you empty _NAS Mover Recycle", now + movedBytes),
+        ]
+    }
+
+    private func spaceRow(_ role: String, _ place: String, _ v: Volume, after: [(String, Int64)], warn: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(role).font(.body.weight(.semibold))
+                Text(place).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Text("\(fmtBytes(v.size)) disk").font(.caption).foregroundStyle(.secondary)
+            }
+            spaceLine("Free now", v.free, v)
+            ForEach(after, id: \.0) { label, free in
+                spaceLine(label, free, v).foregroundStyle(warn ? Color.red : Color.primary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func spaceLine(_ label: String, _ free: Int64, _ v: Volume) -> some View {
+        HStack {
+            Text(label).font(.callout)
+            Spacer()
+            Text("\(fmtBytes(max(0, free))) free · \(v.usedPercent(free: free))% full").font(.callout).monospacedDigit()
+        }
+    }
 
     private var notEnoughSpace: Bool {
         guard let free = preview.freeBytes else { return false }
@@ -188,9 +231,18 @@ struct PreviewSheet: View {
                 LabeledContent("Estimated time") {
                     Text(fmtDuration(estimateSeconds(files: preview.filesToCopy, bytes: preview.bytesToCopy) * (verify ? 1.8 : 1)))
                 }
-                if let free = preview.freeBytes {
-                    LabeledContent("Free space at destination") {
-                        Text(fmtBytes(free)).foregroundStyle(notEnoughSpace ? .red : .primary)
+            }
+            .formStyle(.grouped)
+
+            Form {
+                Section("Disk space") {
+                    if let dst = preview.dstVolume {
+                        spaceRow("Destination", destination.host.name + " › " + destination.share.name, dst,
+                                 after: [("After the \(mode == .move ? "move" : "copy")", dst.free - destinationCost)],
+                                 warn: notEnoughSpace)
+                    }
+                    if let src = preview.srcVolume {
+                        spaceRow("Source", sourceHost.name + " › " + sources[0].share.name, src, after: sourceAfter(src), warn: false)
                     }
                 }
             }

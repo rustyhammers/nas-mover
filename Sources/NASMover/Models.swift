@@ -94,13 +94,25 @@ struct PreviewItem: Identifiable, Hashable {
     var id: String { path }
 }
 
+/// One NAS volume (from df): `id` tells two shares on the same disk apart from different disks.
+struct Volume: Hashable {
+    var host: HostID
+    var id: String
+    var size: Int64
+    var free: Int64
+    func usedPercent(free f: Int64) -> Int { size > 0 ? Int((Double(size - f) / Double(size) * 100).rounded()) : 0 }
+}
+
 struct TransferPreview {
     var newFiles: [PreviewItem] = []
     var updatedFiles: [PreviewItem] = []
     var skippedNewer: [PreviewItem] = []
     var totalItems: Int = 0
     var totalBytes: Int64 = 0
-    var freeBytes: Int64?
+    var freeBytes: Int64? { dstVolume?.free }
+    /// Disk space on the destination's and the source's volumes, read at preview time.
+    var dstVolume: Volume?
+    var srcVolume: Volume?
 
     var bytesToCopy: Int64 { (newFiles + updatedFiles).reduce(0) { $0 + $1.size } }
     var filesToCopy: Int { newFiles.count + updatedFiles.count }
