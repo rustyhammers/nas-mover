@@ -28,6 +28,8 @@ struct JobSpec {
     var lists: [String: [String]] = [:]
     /// Verify Folder job: folder (on `runner`) to check against its ASC MHL history.
     var verifyFolder: String?
+    /// Empty job: absolute paths inside a _NAS Mover Recycle folder to delete permanently.
+    var purge: [String] = []
 }
 
 struct FileEntry {
@@ -108,6 +110,104 @@ enum NAS {
             .map { String($0.dropFirst(2)) }
             .filter { !$0.hasPrefix(".") && !$0.hasPrefix("@") && $0 != "#recycle" && $0 != "ascmhl" && $0 != Share.recycleFolder }
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    /// Folders and files directly inside `loc` (hidden/system items left out).
+    static func entries(_ loc: Location) async throws -> [Entry] {
+        let cmd = "cd \(shq(loc.fullPath)) && { find . -mindepth 1 -maxdepth 1 -type d -exec stat -c 'D|0|%Y|%n' {} + ; find . -mindepth 1 -maxdepth 1 ! -type d -exec stat -c 'F|%s|%Y|%n' {} + ; } 2>/dev/null; true"
+        let out = try await SSH.check(target(loc.host), cmd)
+        return out.split(separator: "\n").compactMap { line -> Entry? in
+            let f = line.split(separator: "|", maxSplits: 3, omittingEmptySubsequences: false)
+            guard f.count == 4 else { return nil }
+            var name = String(f[3])
+            if name.hasPrefix("./") { name.removeFirst(2) }
+            guard !name.hasPrefix("."), !name.hasPrefix("@"), name != "#recycle", name != Share.recycleFolder,
+                  name != "Thumbs.db", name != "desktop.ini" else { return nil }
+            let isDir = f[0] == "D"
+            return Entry(name: name, isDir: isDir, size: isDir ? nil : Int64(f[1]),
+                         modified: Date(timeIntervalSince1970: TimeInterval(f[2]) ?? 0))
+        }
+        .sorted { ($0.isDir ? 0 : 1, $0.name.lowercased()) < ($1.isDir ? 0 : 1, $1.name.lowercased()) }
+    }
+
+    /// Total size of each named item inside `loc` (du; can take a while for big folders).
+    static func sizes(_ loc: Location, _ names: [String]) async throws -> [String: Int64] {
+        guard !names.isEmpty else { return [:] }
+        let args = names.map { shq("./" + $0) }.joined(separator: " ")
+        let out = try await SSH.check(target(loc.host), "cd \(shq(loc.fullPath)) && du -sk \(args) 2>/dev/null; true")
+        var result: [String: Int64] = [:]
+        for line in out.split(separator: "\n") {
+            let f = line.split(separator: "\t", maxSplits: 1)
+            guard f.count == 2, let kb = Int64(f[0]) else { continue }
+            var name = String(f[1])
+            if name.hasPrefix("./") { name.removeFirst(2) }
+            result[name] = kb * 1024
+        }
+        return result
+    }
+
+    /// Moves the named items in `loc` into the share's _NAS Mover Recycle (instant: same disk). Returns where they went.
+    @discardableResult
+    static func moveToRecycle(_ loc: Location, _ names: [String]) async throws -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd_HHmmss"
+        let dest = loc.recycleDir(job: f.string(from: Date()) + "_deleted")
+        var script = "D=\(shq(dest))\ncd \(shq(loc.fullPath)) || exit 1\nmkdir -p \"$D\" || exit 1\nfail=0\n"
+        for n in names {
+            script += "mv \(shq("./" + n)) \"$D/\" || fail=1\n"
+        }
+        if loc.host == .unas, !settings.unasOwner.isEmpty {
+            // Folders mkdir created are root's; hand them to the UniFi Drive owner like everything else.
+            script += "find \(shq(loc.share.recycleRoot)) -user root -type d -exec chmod 770 {} + -exec chown -h \(shq(settings.unasOwner)) {} +\n"
+        }
+        script += "exit $fail\n"
+        _ = try await SSH.check(target(loc.host), "sh -s", stdin: Data(script.utf8))
+        return dest
+    }
+
+    /// Every share on `h` that has a _NAS Mover Recycle folder, with its size and top-level contents.
+    static func recycleBins(_ h: HostID, shares: [Share]) async throws -> [RecycleBin] {
+        var script = ""
+        for s in shares {
+            script += "R=\(shq(s.recycleRoot)); if [ -d \"$R\" ]; then echo \"@@ \(s.name.replacingOccurrences(of: "\n", with: " "))\"; du -sk \"$R\" | cut -f1; (cd \"$R\" && for i in * .[!.]*; do [ -e \"$i\" ] && du -sk \"./$i\"; done); fi\n"
+        }
+        let out = try await SSH.check(target(h), "sh -s", stdin: Data(script.utf8))
+        var bins: [RecycleBin] = []
+        var cur: RecycleBin?
+        var expectTotal = false
+        for raw in out.split(separator: "\n") {
+            let line = String(raw)
+            if line.hasPrefix("@@ ") {
+                if let c = cur { bins.append(c) }
+                let name = String(line.dropFirst(3))
+                cur = shares.first { $0.name == name }.map { RecycleBin(share: $0, total: 0, items: []) }
+                expectTotal = true
+            } else if expectTotal {
+                cur?.total = (Int64(line) ?? 0) * 1024
+                expectTotal = false
+            } else {
+                let f = line.split(separator: "\t", maxSplits: 1)
+                guard f.count == 2, let kb = Int64(f[0]) else { continue }
+                var name = String(f[1])
+                if name.hasPrefix("./") { name.removeFirst(2) }
+                cur?.items.append((name, kb * 1024))
+            }
+        }
+        if let c = cur { bins.append(c) }
+        return bins.filter { !$0.items.isEmpty }
+    }
+
+    /// Permanently deletes items inside a recycle folder, as a job on that NAS (the runner refuses anything else).
+    static func emptyRecycle(_ bin: RecycleBin, names: [String]) async throws {
+        let id = newJobID("empty")
+        let bytes = bin.items.filter { names.contains($0.name) }.reduce(Int64(0)) { $0 + $1.size }
+        var job = JobSpec(id: id, title: "Empty: \(bin.share.host.name) › \(bin.share.name) › \(Share.recycleFolder)\(names.count == bin.items.count ? "" : " (\(names.count) item\(names.count == 1 ? "" : "s"))")",
+                          runner: bin.share.host)
+        job.purge = names.map { bin.path + "/" + $0 }
+        job.totalFiles = names.count
+        job.totalBytes = bytes
+        job.verify = false
+        try await start(job)
     }
 
     static func exists(_ h: HostID, _ path: String) async throws -> Bool {
@@ -214,6 +314,9 @@ enum NAS {
             ("VERIFY", job.verify ? "1" : "0"),
         ]
         if let vf = job.verifyFolder { env.append(("VF_PATH", vf)) }
+        if !job.purge.isEmpty {
+            env.append(("PURGE_LIST", dir + "/purge.list"))
+        }
         for (i, c) in job.copies.enumerated() {
             let n = i + 1
             env += [
@@ -243,6 +346,7 @@ enum NAS {
         try await put("job.env", envText)
         try await put("title", job.title + "\n")
         try await put("total", "\(job.totalFiles) \(job.totalBytes)\n")
+        if !job.purge.isEmpty { try await put("purge.list", job.purge.joined(separator: "\n") + "\n") }
         for (name, paths) in job.lists {
             try await put(name, paths.joined(separator: "\n") + "\n")
         }

@@ -16,6 +16,7 @@
 #   RECYCLEn_HOST RECYCLEn_ROOT RECYCLEn_DEST
 #   RECYCLEn_LIST  SELF (move ROOT itself) or a file of relative paths
 #   VF_PATH        Verify Folder job: folder on this box to check against its ASC MHL history
+#   PURGE_LIST     Empty job: file of absolute paths to delete permanently (only inside _NAS Mover Recycle)
 
 TOOL_VERSION=1.1
 J="$1"
@@ -49,6 +50,7 @@ on() { # host; runs the script on stdin there
 # progress = "<files done> <bytes done>", including the part of each worker's current file already sent.
 # Each worker log interleaves our --out-format lines (flags|size|path) with rsync's \r-separated --progress lines.
 update_progress() {
+	[ -n "$PURGE_LIST" ] && return   # purge() writes its own progress
 	for f in log.*; do
 		[ -f "$f" ] || continue
 		tr '\r' '\n' < "$f" | awk -F'|' '
@@ -415,6 +417,32 @@ verify_folder() {
 	fi
 }
 
+# --- Empty job ----------------------------------------------------------------
+
+purge() {
+	total=$(grep -c . "$PURGE_LIST")
+	i=0
+	done_n=0
+	skipped=0
+	while IFS= read -r p; do
+		[ -n "$p" ] || continue
+		i=$((i + 1))
+		# Hard limit: only ever delete things inside a NAS Mover recycle folder.
+		case "$p" in
+			*"/_NAS Mover Recycle/"?*) ;;
+			*) echo "refused (not in _NAS Mover Recycle): $p" >> err.purge; skipped=$((skipped + 1)); continue ;;
+		esac
+		case "$p" in *"/../"*|*"/.."|*"/./"*) echo "refused (relative path): $p" >> err.purge; skipped=$((skipped + 1)); continue ;; esac
+		say "Permanently deleting $i of $total"
+		rm -rf "$p" && done_n=$((done_n + 1))
+		echo "$done_n 0" > progress
+	done < "$PURGE_LIST"
+	if [ $skipped -gt 0 ]; then
+		finish failed "Deleted $done_n item(s); refused $skipped outside _NAS Mover Recycle"
+	fi
+	finish done "Permanently deleted $done_n item(s)"
+}
+
 # --- Main --------------------------------------------------------------------
 
 on_cancel() {
@@ -441,6 +469,7 @@ progress_loop &
 PROG=$!
 
 [ -n "$VF_PATH" ] && verify_folder
+[ -n "$PURGE_LIST" ] && { kill $PROG 2>/dev/null; purge; }
 
 n=1
 while eval "[ -n \"\$COPY${n}_FROM\" ]"; do

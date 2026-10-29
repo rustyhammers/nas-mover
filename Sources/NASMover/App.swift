@@ -50,6 +50,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     case transfer = "Copy / Move"
     case unify = "Unify"
     case verify = "Verify"
+    case browse = "Browse"
     case jobs = "Jobs"
     var id: String { rawValue }
     var icon: String {
@@ -57,6 +58,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .transfer: return "arrow.right.doc.on.clipboard"
         case .unify: return "arrow.triangle.merge"
         case .verify: return "checkmark.seal"
+        case .browse: return "folder"
         case .jobs: return "list.bullet.rectangle"
         }
     }
@@ -95,6 +97,7 @@ struct ContentView: View {
             case .transfer: TransferView(showJobs: { section = .jobs })
             case .unify: UnifyView(showJobs: { section = .jobs })
             case .verify: VerifyView(showJobs: { section = .jobs })
+            case .browse: BrowseView(showJobs: { section = .jobs })
             case .jobs: JobsView()
             }
     }

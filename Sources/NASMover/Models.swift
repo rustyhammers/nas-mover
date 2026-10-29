@@ -88,6 +88,24 @@ enum TransferMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// A file or folder in the Browse tab.
+struct Entry: Identifiable, Hashable {
+    var name: String
+    var isDir: Bool
+    var size: Int64?          // files always; folders once measured
+    var modified: Date
+    var id: String { name }
+}
+
+/// One share's _NAS Mover Recycle folder and what's in it.
+struct RecycleBin: Identifiable {
+    var share: Share
+    var total: Int64
+    var items: [(name: String, size: Int64)]
+    var id: String { share.id }
+    var path: String { share.recycleRoot }
+}
+
 struct PreviewItem: Identifiable, Hashable {
     var path: String
     var size: Int64
