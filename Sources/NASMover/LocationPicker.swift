@@ -3,6 +3,7 @@ import SwiftUI
 /// Pick a NAS and a share, then browse folders.
 /// - Single mode (`checked == nil`): the folder you're looking at is the selection.
 /// - Checkbox mode: tick any folders (across different places); clicking a name opens it.
+///   Ticked folders can also be deleted (moved to that share's _NAS Mover Recycle).
 struct LocationPicker: View {
     let title: String
     @Binding var location: Location?
@@ -15,6 +16,9 @@ struct LocationPicker: View {
     @State private var loading = false
     @State private var error: String?
     @State private var filter = ""
+    @State private var pendingDelete: [Location] = []
+    @State private var deleting = false
+    @State private var notice: String?
 
     private var multi: Bool { checked != nil }
 
@@ -78,15 +82,29 @@ struct LocationPicker: View {
                             .buttonStyle(.plain)
                             .help("Open \(name)")
                         }
+                        .contextMenu {
+                            if multi && !inRecycle(loc) {
+                                Button("Delete…", role: .destructive) { pendingDelete = [loc.child(name)] }
+                            }
+                        }
                     }
                     .listStyle(.bordered(alternatesRowBackgrounds: true))
-                    if loading { ProgressView() }
+                    if loading || deleting { ProgressView() }
                     else if let error { Text(error).foregroundStyle(.red).padding() }
                     else if folders.isEmpty { Text("No subfolders").foregroundStyle(.secondary) }
                 }
 
+                if let notice {
+                    Label(notice, systemImage: "checkmark.circle").font(.caption).foregroundStyle(.secondary)
+                }
                 if let checked, !checked.wrappedValue.isEmpty {
-                    SelectedChips(items: checked)
+                    SelectedChips(items: checked, onDelete: deleting ? nil : {
+                        // A ticked folder inside another ticked folder goes along with it.
+                        let all = checked.wrappedValue.filter { !inRecycle($0) }
+                        pendingDelete = all.filter { l in
+                            !all.contains { $0 != l && $0.host == l.host && $0.share == l.share && l.rel.hasPrefix($0.rel + "/") }
+                        }
+                    })
                 }
             } else {
                 Spacer()
@@ -98,6 +116,53 @@ struct LocationPicker: View {
         .onChange(of: host) { _, h in if location != nil && location?.host != h { location = nil } }
         .onChange(of: location) { _, l in if let l, l.host != host { host = l.host } }
         .task(id: location) { await load() }
+        .confirmationDialog(deleteTitle, isPresented: Binding(get: { !pendingDelete.isEmpty }, set: { if !$0 { pendingDelete = [] } })) {
+            let items = pendingDelete
+            Button("Move to _NAS Mover Recycle", role: .destructive) { Task { await delete(items) } }
+        } message: {
+            Text(deleteMessage)
+        }
+    }
+
+    private var deleteTitle: String {
+        pendingDelete.count == 1 ? "Delete “\(pendingDelete[0].displayName)”?" : "Delete \(pendingDelete.count) folders?"
+    }
+
+    private var deleteMessage: String {
+        let shown = pendingDelete.prefix(8).map { "• " + $0.breadcrumb }.joined(separator: "\n")
+        let more = pendingDelete.count > 8 ? "\n…and \(pendingDelete.count - 8) more" : ""
+        return shown + more + "\n\nThey move to each share's “_NAS Mover Recycle” folder right away. Nothing is erased until you empty it from Browse › Recycle Folders."
+    }
+
+    private func inRecycle(_ l: Location) -> Bool {
+        l.rel.split(separator: "/").first.map(String.init) == Share.recycleFolder
+    }
+
+    /// Ticked folders can sit in different places, so recycle them one parent folder at a time.
+    private func delete(_ items: [Location]) async {
+        deleting = true
+        error = nil
+        notice = nil
+        var groups: [Location: [String]] = [:]
+        for l in items { if let p = l.parent { groups[p, default: []].append(l.displayName) } }
+        var done = 0
+        var failures: [String] = []
+        for (parent, names) in groups {
+            do {
+                _ = try await NAS.moveToRecycle(parent, names)
+                done += names.count
+                let gone = names.map { parent.child($0) }
+                checked?.wrappedValue.removeAll { l in
+                    gone.contains { $0.share == l.share && (l.rel == $0.rel || l.rel.hasPrefix($0.rel + "/")) }
+                }
+            } catch {
+                failures.append("\(parent.breadcrumb): \(error.localizedDescription)")
+            }
+        }
+        if done > 0 { notice = "Moved \(done) folder\(done == 1 ? "" : "s") to _NAS Mover Recycle." }
+        await load()
+        if !failures.isEmpty { error = "Couldn't delete everything — " + failures.joined(separator: "; ") }
+        deleting = false
     }
 
     private var filteredFolders: [String] {
@@ -144,6 +209,7 @@ struct LocationPicker: View {
         guard let loc = location else { folders = []; return }
         loading = true
         error = nil
+        if !deleting { notice = nil }
         do { folders = try await NAS.folders(loc) } catch {
             folders = []
             self.error = error.localizedDescription
@@ -155,12 +221,18 @@ struct LocationPicker: View {
 /// The ticked folders, each removable.
 struct SelectedChips: View {
     @Binding var items: [Location]
+    /// When set, shows a Delete… button for the ticked folders.
+    var onDelete: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("\(items.count) selected").font(.caption.weight(.semibold))
                 Spacer()
+                if let onDelete {
+                    Button("Delete…", role: .destructive, action: onDelete).controlSize(.small)
+                        .help("Move the ticked folders to _NAS Mover Recycle")
+                }
                 Button("Clear") { items.removeAll() }.controlSize(.small).buttonStyle(.link)
             }
             ScrollView {

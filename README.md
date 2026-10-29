@@ -7,7 +7,7 @@ A Mac app for moving large amounts of data between a **QNAP** NAS and a **UniFi 
 - **Copy / Move:** parallel rsync over SSH, running *on the NAS*. Transfers keep going if the Mac sleeps or the app quits.
 - **Unify:** compare two copies of the same project folder, review every difference, and make both sides match.
 - **Verify:** every copy is checked with MD5 on both sides and recorded as an [ASC MHL](https://theasc.com/society/ascmitc/asc-media-hash-list) manifest (`ascmhl/` inside the folder), the same standard used by Hedge, ShotPut Pro and Silverstack. Re-check any folder later for silent corruption.
-- **Browse:** look through either NAS, tick files and folders, see their sizes and delete them (handy for clearing duplicates). Deleted items go to the share's `_NAS Mover Recycle` folder. **Recycle Folders…** shows what's in each one and empties it permanently when you're sure.
+- **Browse:** look through either NAS, tick files and folders, see their sizes and delete them (handy for clearing duplicates). Deleted items go to the share's `_NAS Mover Recycle` folder. **Recycle Folders…** shows what's in each one and empties it permanently when you're sure. The Copy / Move folder picker has the same **Delete…** for ticked folders (or right-click a folder), so you can clear a duplicate right where you pick.
 - **Nothing is permanently deleted** unless you empty a recycle folder yourself. Originals from a Move, and any files replaced or removed, go to a `_NAS Mover Recycle/<job>` folder at the root of that share. Empty it yourself once you've checked the result. It deliberately isn't the NAS's own recycle bin: QNAP's bin deletes files by age, which would remove old footage within hours.
 
 ## Install
