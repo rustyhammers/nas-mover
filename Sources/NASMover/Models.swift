@@ -53,6 +53,25 @@ struct Share: Hashable, Identifiable {
     /// originals hours after it finished because the footage was older than its 180-day limit).
     var recycleRoot: String { path + "/" + Share.recycleFolder }
     static let recycleFolder = "_NAS Mover Recycle"
+    /// The NAS's own recycle bin for this share (QNAP @Recycle, UniFi Drive .trashcan), when it's turned on.
+    /// Deleting from Browse goes here, so the NAS empties it by itself; jobs keep using _NAS Mover Recycle.
+    var nasBin: String?
+    var binRetention: String?
+
+    /// Where Browse's Delete sends things, as a person would call it.
+    var binName: String {
+        guard nasBin != nil else { return "_NAS Mover Recycle" }
+        return host == .qnap ? "the QNAP Recycle Bin" : "the UniFi Drive Recycle Bin"
+    }
+
+    /// What happens to deleted items afterwards.
+    var binNote: String {
+        guard nasBin != nil else {
+            return "This share's own recycle bin is off, so they go to “\(name) › \(Share.recycleFolder)” and stay until you empty it from Browse › Recycle Folders. Turn on the recycle bin for this share in \(host == .qnap ? "QTS" : "UniFi Drive") to have deletes empty themselves."
+        }
+        if host == .qnap { return (binRetention ?? "") + " Restore from File Station › Recycle Bin before then." }
+        return "Restore or empty them from UniFi Drive › \(name) › Recycle Bin; UniFi Drive also empties it on its own schedule."
+    }
     var id: String { host.rawValue + ":" + name }
 
     /// Name with spaces/case removed, used to match the same share across NASes.

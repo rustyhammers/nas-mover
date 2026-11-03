@@ -3,7 +3,7 @@ import SwiftUI
 /// Pick a NAS and a share, then browse folders.
 /// - Single mode (`checked == nil`): the folder you're looking at is the selection.
 /// - Checkbox mode: tick any folders (across different places); clicking a name opens it.
-///   Ticked folders can also be deleted (moved to that share's _NAS Mover Recycle).
+///   Ticked folders can also be deleted (moved to that share's recycle bin).
 struct LocationPicker: View {
     let title: String
     @Binding var location: Location?
@@ -119,7 +119,7 @@ struct LocationPicker: View {
         .task(id: location) { await load() }
         .confirmationDialog(deleteTitle, isPresented: Binding(get: { !pendingDelete.isEmpty }, set: { if !$0 { pendingDelete = [] } })) {
             let items = pendingDelete
-            Button("Move to _NAS Mover Recycle", role: .destructive) { Task { await delete(items) } }
+            Button("Move to Recycle Bin", role: .destructive) { Task { await delete(items) } }
         } message: {
             Text(deleteMessage)
         }
@@ -132,7 +132,10 @@ struct LocationPicker: View {
     private var deleteMessage: String {
         let shown = pendingDelete.prefix(8).map { "• " + $0.breadcrumb }.joined(separator: "\n")
         let more = pendingDelete.count > 8 ? "\n…and \(pendingDelete.count - 8) more" : ""
-        return shown + more + "\n\nThey move to each share's “_NAS Mover Recycle” folder right away. Nothing is erased until you empty it from Browse › Recycle Folders."
+        var shares: [Share] = []
+        for l in pendingDelete where !shares.contains(l.share) { shares.append(l.share) }
+        let notes = shares.map { shares.count == 1 ? "They move to \($0.binName) right away.\n\n\($0.binNote)" : "\($0.host.name) › \($0.name): \($0.binName). \($0.binNote)" }
+        return shown + more + "\n\n" + notes.joined(separator: "\n\n")
     }
 
     private func inRecycle(_ l: Location) -> Bool {
@@ -160,7 +163,7 @@ struct LocationPicker: View {
                 failures.append("\(parent.breadcrumb): \(error.localizedDescription)")
             }
         }
-        if done > 0 { notice = "Moved \(done) folder\(done == 1 ? "" : "s") to _NAS Mover Recycle." }
+        if done > 0 { notice = "Moved \(done) folder\(done == 1 ? "" : "s") to the recycle bin." }
         await load()
         if !failures.isEmpty { error = "Couldn't delete everything — " + failures.joined(separator: "; ") }
         deleting = false
@@ -232,7 +235,7 @@ struct SelectedChips: View {
                 Spacer()
                 if let onDelete {
                     Button("Delete…", role: .destructive, action: onDelete).controlSize(.small)
-                        .help("Move the ticked folders to _NAS Mover Recycle")
+                        .help("Move the ticked folders to the recycle bin")
                 }
                 Button("Clear") { items.removeAll() }.controlSize(.small).buttonStyle(.link)
             }

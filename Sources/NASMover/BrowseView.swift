@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// A file browser for either NAS: tick files and folders, see their sizes, and delete them
-/// (into the share's _NAS Mover Recycle, which you empty later from Recycle Folders).
+/// (into the share's own recycle bin, or _NAS Mover Recycle where that's off).
 struct BrowseView: View {
     var showJobs: () -> Void
 
@@ -113,7 +113,7 @@ struct BrowseView: View {
                 }
             } else {
                 ContentUnavailableView("Choose a share", systemImage: "externaldrive.connected.to.line.below",
-                                       description: Text("Browse either NAS, tick files and folders, and delete them. Deleted items go to that share's “_NAS Mover Recycle” folder until you empty it."))
+                                       description: Text("Browse either NAS, tick files and folders, and delete them. Deleted items go to the NAS's own recycle bin for that share, which empties itself (or to “_NAS Mover Recycle” where the share's recycle bin is off)."))
             }
         }
         .padding(20)
@@ -121,7 +121,7 @@ struct BrowseView: View {
         .onChange(of: host) { _, h in if location?.host != h { location = nil; entries = []; selection = [] } }
         .task(id: location) { await load() }
         .confirmationDialog(deleteTitle, isPresented: $confirmDelete) {
-            Button("Move to _NAS Mover Recycle", role: .destructive) { Task { await delete() } }
+            Button("Move to \(location?.share.nasBin == nil ? "_NAS Mover Recycle" : "Recycle Bin")", role: .destructive) { Task { await delete() } }
         } message: {
             Text(deleteMessage)
         }
@@ -168,8 +168,8 @@ struct BrowseView: View {
         let names = selected.prefix(6).map(\.name).joined(separator: "\n")
         let more = selected.count > 6 ? "\n…and \(selected.count - 6) more" : ""
         let size = selected.contains { $0.size == nil } ? "" : " (\(fmtBytes(selected.compactMap(\.size).reduce(0, +))))"
-        let share = location?.share.name ?? "the share"
-        return "\(names)\(more)\n\nThey move instantly into “\(share) › _NAS Mover Recycle”\(size). The space is freed when you empty it from Recycle Folders."
+        guard let share = location?.share else { return names + more }
+        return "\(names)\(more)\n\nThey move instantly into \(share.binName)\(size).\n\n\(share.binNote)"
     }
 
     private func open(_ loc: Location?) {
@@ -213,7 +213,7 @@ struct BrowseView: View {
         let names = selected.map(\.name)
         do {
             try await NAS.moveToRecycle(loc, names)
-            notice = "Moved \(names.count) item\(names.count == 1 ? "" : "s") to _NAS Mover Recycle."
+            notice = "Moved \(names.count) item\(names.count == 1 ? "" : "s") to \(loc.share.binName)."
             selection = []
             entries.removeAll { names.contains($0.name) }
             await load()

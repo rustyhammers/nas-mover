@@ -106,27 +106,48 @@ enum NAS {
 
     static func shares(_ h: HostID) async throws -> [Share] {
         let conf = h == .qnap ? "/etc/config/smb.conf" : "/etc/samba/share.conf"
-        let text = try await SSH.check(target(h), "cat \(conf)")
-        var result: [Share] = []
-        var section: String?
+        // The QNAP's recycle-bin retention lives in its own section of uLinux.conf.
+        let extra = h == .qnap ? "; echo '[[recycle policy]]'; sed -n '/^\\[Network Recycle Bin\\]/,/^\\[/p' /etc/config/uLinux.conf" : ""
+        let text = try await SSH.check(target(h), "cat \(conf)\(extra)")
+        // Collect each section's settings first: the recycle-bin lines come after `path`.
+        var sections: [(name: String, keys: [String: String])] = []
+        var policy: [String: String] = [:]
+        var inPolicy = false
         for raw in text.split(separator: "\n") {
             let line = raw.trimmingCharacters(in: .whitespaces)
+            if line == "[[recycle policy]]" { inPolicy = true; continue }
             if line.hasPrefix("[") && line.hasSuffix("]") {
-                section = String(line.dropFirst().dropLast())
+                if !inPolicy { sections.append((String(line.dropFirst().dropLast()), [:])) }
                 continue
             }
-            guard let name = section, line.lowercased().hasPrefix("path") else { continue }
             guard let eq = line.firstIndex(of: "=") else { continue }
-            let path = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            let key = line[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            if inPolicy { policy[key] = value } else if !sections.isEmpty { sections[sections.count - 1].keys[key] = value }
+        }
+        var retention: String?
+        if policy["enable"] == "TRUE" {
+            let time = policy["clean time"] ?? "its daily clean-up"
+            retention = policy["reten day enable"] == "TRUE"
+                ? "The QNAP permanently erases recycle-bin items older than \(policy["reten day"] ?? "?") days every day at \(time) — judged by each file's own date, so older footage is erased at the next \(time)."
+                : "The QNAP keeps recycle-bin items until you empty it."
+        }
+        var result: [Share] = []
+        for (name, keys) in sections {
+            guard let path = keys["path"] else { continue }
+            var share = Share(host: h, name: name, path: path)
             switch h {
             case .qnap:
                 if name == "global" || name.hasPrefix("Dev") && name.contains("Partition") || path.hasPrefix("/share/external") { continue }
-                result.append(Share(host: h, name: name, path: path))
+                if keys["recycle bin"] == "yes", let retention { share.nasBin = path + "/@Recycle"; share.binRetention = retention }
             case .unas:
                 guard path.contains("/.unifi-drive/"), path.hasSuffix("/.data"), !path.contains("%") else { continue }
-                result.append(Share(host: h, name: name, path: path))
+                // UniFi Drive turns a share's recycle bin off by excluding everything.
+                if keys["recycle:repository"] == "../.trashcan", keys["recycle:exclude"]?.hasPrefix("*") == false {
+                    share.nasBin = (path as NSString).deletingLastPathComponent + "/.trashcan"
+                }
             }
-            section = nil
+            result.append(share)
         }
         return result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
@@ -173,19 +194,30 @@ enum NAS {
         return result
     }
 
-    /// Moves the named items in `loc` into the share's _NAS Mover Recycle (instant: same disk). Returns where they went.
+    /// Moves the named items in `loc` into the share's own recycle bin when it has one turned on, else into
+    /// _NAS Mover Recycle (instant either way: same disk). Returns where they went.
     @discardableResult
     static func moveToRecycle(_ loc: Location, _ names: [String]) async throws -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd_HHmmss"
-        let dest = loc.recycleDir(job: f.string(from: Date()) + "_deleted")
+        let dest: String, binRoot: String
+        if let bin = loc.share.nasBin {
+            // Same layout the NAS uses for SMB deletes (original folder path kept), so its own Restore works.
+            dest = loc.rel.isEmpty ? bin : bin + "/" + loc.rel
+            binRoot = bin
+        } else {
+            let f = DateFormatter()
+            f.dateFormat = "yyyy-MM-dd_HHmmss"
+            dest = loc.recycleDir(job: f.string(from: Date()) + "_deleted")
+            binRoot = loc.share.recycleRoot
+        }
         var script = "D=\(shq(dest))\ncd \(shq(loc.fullPath)) || exit 1\nmkdir -p \"$D\" || exit 1\nfail=0\n"
+        // Never overwrite something already in the bin: name clashes become "Copy #2 of …", as the NAS does it.
+        script += "put() { t=\"$D/$1\"; i=1; while [ -e \"$t\" ] || [ -L \"$t\" ]; do i=$((i + 1)); t=\"$D/Copy #$i of $1\"; done; mv \"./$1\" \"$t\"; }\n"
         for n in names {
-            script += "mv \(shq("./" + n)) \"$D/\" || fail=1\n"
+            script += "put \(shq(n)) || fail=1\n"
         }
         if loc.host == .unas, !settings.unasOwner.isEmpty {
             // Folders mkdir created are root's; hand them to the UniFi Drive owner like everything else.
-            script += "find \(shq(loc.share.recycleRoot)) -user root -type d -exec chmod 770 {} + -exec chown -h \(shq(settings.unasOwner)) {} +\n"
+            script += "find \(shq(binRoot)) -user root -type d -exec chmod 770 {} + -exec chown -h \(shq(settings.unasOwner)) {} +\n"
         }
         script += "exit $fail\n"
         _ = try await SSH.check(target(loc.host), "sh -s", stdin: Data(script.utf8))
