@@ -89,6 +89,7 @@ struct LocationPicker: View {
                         }
                     }
                     .listStyle(.bordered(alternatesRowBackgrounds: true))
+                    .frame(minHeight: 200)
                     if loading || deleting { ProgressView() }
                     else if let error { Text(error).foregroundStyle(.red).padding() }
                     else if folders.isEmpty { Text("No subfolders").foregroundStyle(.secondary) }
@@ -107,9 +108,9 @@ struct LocationPicker: View {
                     })
                 }
             } else {
-                Spacer()
-                Text("Choose a share to browse.").foregroundStyle(.secondary).frame(maxWidth: .infinity)
-                Spacer()
+                Text("Choose a share to browse.").foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 200, maxHeight: 400)
+                    .background(RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary))
             }
         }
         .onAppear { host = location?.host ?? defaultHost }

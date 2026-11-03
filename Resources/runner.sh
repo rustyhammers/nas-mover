@@ -17,8 +17,15 @@
 #   RECYCLEn_LIST  SELF (move ROOT itself) or a file of relative paths
 #   VF_PATH        Verify Folder job: folder on this box to check against its ASC MHL history
 #   PURGE_LIST     Empty job: file of absolute paths to delete permanently (only inside _NAS Mover Recycle)
+#   AUDIT_A_HOST AUDIT_A AUDIT_B_HOST AUDIT_B
+#                  Checksum job: MD5 every file in both folders; the app compares hash.a and hash.b
+#   BESIDE_HOST BESIDE_STAGING BESIDE_DEST BESIDE_SUFFIX BESIDE_LIST
+#                  After verifying, move each listed file from STAGING to DEST as "name<SUFFIX>.ext", never overwriting
+#   RETIRE_HOST RETIRE_ROOT RETIRE_EXPECT
+#                  Before recycling, refuse unless ROOT still matches EXPECT (size TAB mtime TAB path) exactly
+#   RECYCLEn_LIST  may also be CONTENTS: move everything inside ROOT (a share root can't move itself)
 
-TOOL_VERSION=1.1
+TOOL_VERSION=1.2
 J="$1"
 cd "$J" || exit 1
 . ./job.env
@@ -163,20 +170,25 @@ hash_tree() {
 cd "$R" || exit 1
 if [ -n "$FIND" ]; then
 	find . \( -name @Recycle -o -name "_NAS Mover Recycle" -o -name .@__thumb -o -name .@upload_cache -o -name .@__qini -o -name .trashcan \
-		-o -name .TemporaryItems -o -name .Trashes -o -name .Spotlight-V100 -o -name .fseventsd -o -name ascmhl \) -prune \
+		-o -name .TemporaryItems -o -name .Trashes -o -name .Spotlight-V100 -o -name .fseventsd -o -name ascmhl \
+		-o -name .streams -o -name '.nasmover-staging-*' \) -prune \
 		-o -type f ! -name .DS_Store ! -name '._*' ! -name Thumbs.db -print | sed 's|^\./||' > "$L"
 fi
 echo "T $(wc -l < "$L" | tr -d ' ')"
 tr '\n' '\0' < "$L" | xargs -0 stat -c 'S %s %Y %n'
 awk -v n="$N" -v pre="$L.c." '{ f = pre "" (NR % n); print > f }' "$L"
-# Report each checksum as soon as it's done: GNU md5sum and mawk otherwise hold output in large buffers.
+# Report each checksum as soon as it's done: GNU md5sum otherwise holds output in large buffers.
+# Each line must reach the shared output in one write, or the parallel workers' lines interleave
+# (mawk -W interactive writes unbuffered, piece by piece). GNU sed -u and busybox awk + fflush both write whole lines.
 SB=""
 command -v stdbuf >/dev/null 2>&1 && SB="stdbuf -oL"
-AWKI="awk"
-awk -W interactive 'BEGIN {}' </dev/null >/dev/null 2>&1 && AWKI="awk -W interactive"
 for c in "$L".c.*; do
 	[ -f "$c" ] || continue
-	tr '\n' '\0' < "$c" | xargs -0 $SB md5sum | $AWKI '{ print "H " $0; fflush() }' &
+	if [ -n "$SB" ] && echo x | sed -u 's/^/H /' >/dev/null 2>&1; then
+		tr '\n' '\0' < "$c" | xargs -0 $SB md5sum | sed -u 's/^/H /' &
+	else
+		tr '\n' '\0' < "$c" | xargs -0 md5sum | awk '{ print "H " $0; fflush() }' &
+	fi
 done
 wait
 rm -f "$L" "$L".c.*
@@ -349,7 +361,23 @@ verify_op() { # n: MD5 both sides, compare; writes mismatch.n
 
 recycle_op() {
 	eval "h=\$RECYCLE${1}_HOST root=\$RECYCLE${1}_ROOT dest=\$RECYCLE${1}_DEST rlist=\$RECYCLE${1}_LIST"
-	if [ "$rlist" = SELF ]; then
+	if [ "$rlist" = CONTENTS ]; then
+		{
+			printf 'R=%s\nD=%s\n' "$(q "$root")" "$(q "$dest")"
+			cat <<'EOS'
+cd "$R" || exit 1
+mkdir -p "$D" || exit 1
+fail=0
+for p in * .[!.]* ..?*; do
+	[ -e "$p" ] || [ -L "$p" ] || continue
+	# Leave the NAS's own system folders and the recycle folder itself.
+	case "$p" in "_NAS Mover Recycle"|@*|.@*|.streams|.DS_Store|.trashcan|.TemporaryItems|.Trashes|.Spotlight-V100|.fseventsd) continue ;; esac
+	mv "./$p" "$D/" || fail=1
+done
+exit $fail
+EOS
+		} | on "$h" || return 1
+	elif [ "$rlist" = SELF ]; then
 		{
 			printf 'R=%s\nD=%s\n' "$(q "$root")" "$(q "$dest")"
 			cat <<'EOS'
@@ -417,6 +445,79 @@ verify_folder() {
 	fi
 }
 
+# --- Checksum two folders (Unify / Retire) -----------------------------------
+
+audit() {
+	say "Hashing both sides (MD5, reading every file)"
+	hash_tree "$AUDIT_A_HOST" "$AUDIT_A" a &
+	a=$!
+	hash_tree "$AUDIT_B_HOST" "$AUDIT_B" b &
+	b=$!
+	ok=0
+	wait $a || ok=1
+	wait $b || ok=1
+	na=$(wc -l < hash.a | tr -d ' ')
+	nb=$(wc -l < hash.b | tr -d ' ')
+	[ $ok = 0 ] || finish failed "Checksummed $na and $nb files, but some couldn't be read or changed while reading (see log)"
+	finish done "Checksummed $na and $nb files"
+}
+
+# --- Retire helpers -------------------------------------------------------------
+
+# Moves verified files out of the staging folder to sit beside the live ones as "name<suffix>.ext".
+beside_op() {
+	{
+		printf 'S=%s\nD=%s\nX=%s\n' "$(q "$BESIDE_STAGING")" "$(q "$BESIDE_DEST")" "$(q "$BESIDE_SUFFIX")"
+		cat <<'EOS'
+fail=0
+while IFS= read -r p; do
+	[ -n "$p" ] || continue
+	[ -f "$S/$p" ] || { echo "missing in staging: $p" >&2; fail=1; continue; }
+	dir=$(dirname "$p"); base=$(basename "$p")
+	case "$base" in ?*.*) stem=${base%.*}; ext=".${base##*.}" ;; *) stem=$base; ext="" ;; esac
+	mkdir -p "$D/$dir" || { fail=1; continue; }
+	t="$D/$dir/$stem$X$ext"; i=2
+	while [ -e "$t" ]; do t="$D/$dir/$stem$X $i$ext"; i=$((i + 1)); done
+	mv "$S/$p" "$t" || fail=1
+done <<'NASMOVER_EOF'
+EOS
+		cat "$BESIDE_LIST"
+		echo NASMOVER_EOF
+		cat <<'EOS'
+# Only remove the staging folder once nothing is left in it.
+[ -z "$(find "$S" -type f | head -1)" ] && rm -rf "$S"
+exit $fail
+EOS
+	} | on "$BESIDE_HOST" 2>> err.beside || return 1
+	[ "$BESIDE_HOST" = unas ] && fix_unas_perms "$BESIDE_DEST"
+	return 0
+}
+
+# Refuses to retire if anything in the stale folder changed since it was checked.
+retire_check() {
+	{
+		printf 'R=%s\n' "$(q "$RETIRE_ROOT")"
+		cat <<'EOS'
+cd "$R" || exit 1
+find . \( -name @Recycle -o -name "_NAS Mover Recycle" -o -name .@__thumb -o -name .@upload_cache -o -name .@__qini -o -name .trashcan \
+	-o -name .TemporaryItems -o -name .Trashes -o -name .Spotlight-V100 -o -name .fseventsd -o -name ascmhl \
+	-o -name .streams -o -name '.nasmover-staging-*' \) -prune \
+	-o -type f ! -name .DS_Store ! -name '._*' ! -name Thumbs.db -print | sed 's|^\./||' | tr '\n' '\0' | xargs -0 -r stat -c '%s %Y %n'
+EOS
+	} | on "$RETIRE_HOST" > retire.now 2>> err.retire || return 1
+	awk -F'\t' '
+		FILENAME == ARGV[1] { want[$3] = $1 " " $2; next }
+		{
+			p = $0; sub(/^[0-9]+ [0-9]+ /, "", p)
+			split($0, f, " ")
+			if (!(p in want)) { print "new since the check: " p; continue }
+			if (want[p] != f[1] " " f[2]) print "changed since the check: " p
+			seen[p] = 1
+		}
+		END { for (p in want) if (!(p in seen)) print "gone since the check: " p }' "$RETIRE_EXPECT" retire.now > retire.problems
+	[ ! -s retire.problems ]
+}
+
 # --- Empty job ----------------------------------------------------------------
 
 purge() {
@@ -470,6 +571,7 @@ PROG=$!
 
 [ -n "$VF_PATH" ] && verify_folder
 [ -n "$PURGE_LIST" ] && { kill $PROG 2>/dev/null; purge; }
+[ -n "$AUDIT_A" ] && audit
 
 n=1
 while eval "[ -n \"\$COPY${n}_FROM\" ]"; do
@@ -500,6 +602,19 @@ if [ "$VERIFY" = 1 ]; then
 		fi
 		n=$((n + 1))
 	done
+fi
+
+if [ -n "$BESIDE_LIST" ]; then
+	say "Placing differing files beside the live ones"
+	beside_op || finish failed "Copied and verified, but couldn't place every file beside the live ones (see log). Nothing was retired."
+fi
+
+if [ -n "$RETIRE_ROOT" ]; then
+	say "Checking the stale copy hasn't changed"
+	if ! retire_check; then
+		cnt=$(wc -l < retire.problems | tr -d ' ')
+		finish failed "Everything was copied and verified, but the stale copy changed since it was checked ($cnt file(s), see log). It was NOT retired; run Retire again."
+	fi
 fi
 
 n=1

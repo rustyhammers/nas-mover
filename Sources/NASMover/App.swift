@@ -49,6 +49,7 @@ struct NASMoverApp: App {
 enum SidebarItem: String, CaseIterable, Identifiable {
     case transfer = "Copy / Move"
     case unify = "Unify"
+    case retire = "Retire"
     case verify = "Verify"
     case browse = "Browse"
     case jobs = "Jobs"
@@ -57,6 +58,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         switch self {
         case .transfer: return "arrow.right.doc.on.clipboard"
         case .unify: return "arrow.triangle.merge"
+        case .retire: return "archivebox"
         case .verify: return "checkmark.seal"
         case .browse: return "folder"
         case .jobs: return "list.bullet.rectangle"
@@ -69,6 +71,9 @@ struct ContentView: View {
     @EnvironmentObject var shares: ShareStore
     @State private var section: SidebarItem? = .transfer
     @State private var showSetup = !AppSettings.shared.isConfigured
+    // Kept here so a comparison (and a checksum running for it) survives switching tabs.
+    @StateObject private var unify = UnifyModel()
+    @StateObject private var retire = RetireModel()
 
     var body: some View {
         NavigationSplitView {
@@ -95,7 +100,8 @@ struct ContentView: View {
     private var detail: some View {
             switch section ?? .transfer {
             case .transfer: TransferView(showJobs: { section = .jobs })
-            case .unify: UnifyView(showJobs: { section = .jobs })
+            case .unify: UnifyView(showJobs: { section = .jobs }, model: unify)
+            case .retire: RetireView(showJobs: { section = .jobs }, model: retire)
             case .verify: VerifyView(showJobs: { section = .jobs })
             case .browse: BrowseView(showJobs: { section = .jobs })
             case .jobs: JobsView()

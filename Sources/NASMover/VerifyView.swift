@@ -18,6 +18,7 @@ struct VerifyView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             LocationPicker(title: "Folder to verify", location: $folder, defaultHost: .unas)
+                .frame(maxWidth: 640, alignment: .topLeading)
 
             Divider()
 
@@ -51,6 +52,7 @@ struct VerifyView: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(folder == nil || checking || starting || history == nil)
             }
+            Spacer(minLength: 0)
         }
         .padding(20)
         .navigationTitle("Verify")

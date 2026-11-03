@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum DiffKind: String, CaseIterable, Identifiable {
-    case onlyA, onlyB, newerA, newerB, conflict, likelySame, identical
+    case onlyA, onlyB, newerA, newerB, conflict, likelySame, moved, damaged, identical
     var id: String { rawValue }
 
     func label(_ a: String, _ b: String) -> String {
@@ -12,6 +12,8 @@ enum DiffKind: String, CaseIterable, Identifiable {
         case .newerB: return "Newer on \(b)"
         case .conflict: return "Conflict"
         case .likelySame: return "Same size, dates differ"
+        case .moved: return "Moved / renamed"
+        case .damaged: return "Contents differ"
         case .identical: return "Identical"
         }
     }
@@ -21,6 +23,8 @@ enum DiffKind: String, CaseIterable, Identifiable {
         case .newerA, .newerB: return .blue
         case .conflict: return .red
         case .likelySame: return .orange
+        case .moved: return .purple
+        case .damaged: return .red
         case .identical: return .secondary
         }
     }
@@ -28,6 +32,8 @@ enum DiffKind: String, CaseIterable, Identifiable {
         switch self {
         case .conflict: return "Both copies were modified at the same time but differ. Pick which one wins."
         case .likelySame: return "Probably the same file with a different timestamp. Use “Check contents” to be sure."
+        case .moved: return "The same file (name, size and date) sits at a different path on the other side, usually because a folder was renamed or moved. Left as is unless you choose otherwise."
+        case .damaged: return "Same size and date, but the checksums differ: one copy may be damaged. Open both before choosing which to keep."
         default: return ""
         }
     }
@@ -42,7 +48,8 @@ enum DiffKind: String, CaseIterable, Identifiable {
         switch self {
         case .onlyA: return [.copyToB, .recycleA, .skip]
         case .onlyB: return [.copyToA, .recycleB, .skip]
-        case .newerA, .newerB, .conflict, .likelySame: return [.copyToB, .copyToA, .skip]
+        case .newerA, .newerB, .conflict, .likelySame, .damaged: return [.copyToB, .copyToA, .skip]
+        case .moved: return [.skip, .copyToB, .copyToA]
         case .identical: return [.skip]
         }
     }
@@ -68,12 +75,16 @@ struct DiffItem: Identifiable, Hashable {
     var b: FileEntry?
     var kind: DiffKind
     var action: UnifyAction
-    var id: String { path }
+    /// For a moved file: where it is on side B (`path` is where it is on side A).
+    var bPath: String? = nil
+    /// Contents confirmed identical by checksum.
+    var verified = false
+    var id: String { path + (bPath.map { "\u{0}" + $0 } ?? "") }
     var top: String { path.split(separator: "/").count > 1 ? String(path.split(separator: "/")[0]) : "(top level)" }
     var size: Int64 { max(a?.size ?? 0, b?.size ?? 0) }
 
-    static func == (l: DiffItem, r: DiffItem) -> Bool { l.path == r.path && l.action == r.action && l.kind == r.kind }
-    func hash(into h: inout Hasher) { h.combine(path) }
+    static func == (l: DiffItem, r: DiffItem) -> Bool { l.id == r.id && l.action == r.action && l.kind == r.kind && l.verified == r.verified }
+    func hash(into h: inout Hasher) { h.combine(id) }
 }
 
 extension FileEntry: Hashable {
@@ -91,6 +102,11 @@ final class UnifyModel: ObservableObject {
     @Published var busy = false
     @Published var error: String?
     @Published var compared: (Location, Location)?
+    @Published var checked: Comparison.Checked?
+    let checksum = ChecksumTracker()
+    private var ma: [String: FileEntry] = [:]
+    private var mb: [String: FileEntry] = [:]
+    private var identicalPaths: [String] = []
 
     /// Timestamps within this many seconds count as equal (FAT/exFAT cards round to 2 s).
     let tolerance: Int64 = 2
@@ -114,28 +130,14 @@ final class UnifyModel: ObservableObject {
             async let ib = NAS.index(b)
             let (ma, mb) = try await (ia, ib)
             status = "Comparing \(ma.count.formatted()) and \(mb.count.formatted()) files…"
-            var out: [DiffItem] = []
-            var same = 0
-            for (path, ea) in ma {
-                guard let eb = mb[path] else {
-                    out.append(DiffItem(path: path, a: ea, b: nil, kind: .onlyA, action: .copyToB)); continue
-                }
-                let dt = ea.mtime - eb.mtime
-                let kind: DiffKind
-                if ea.size == eb.size {
-                    if abs(dt) <= tolerance { same += 1; continue }
-                    kind = .likelySame
-                } else if abs(dt) <= tolerance {
-                    kind = .conflict
-                } else {
-                    kind = dt > 0 ? .newerA : .newerB
-                }
-                out.append(DiffItem(path: path, a: ea, b: eb, kind: kind, action: kind.defaultAction))
-            }
-            for (path, eb) in mb where ma[path] == nil {
-                out.append(DiffItem(path: path, a: nil, b: eb, kind: .onlyB, action: .copyToA))
-            }
-            items = out.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+            self.ma = ma
+            self.mb = mb
+            let r = Comparison.build(ma, mb, tolerance: tolerance)
+            items = r.items
+            identicalPaths = r.identical
+            checked = nil
+            checksum.reset()
+            let same = r.identical.count
             identicalCount = same
             compared = (a, b)
             status = nil
@@ -179,8 +181,27 @@ final class UnifyModel: ObservableObject {
         busy = false
     }
 
+    /// Reads every file on both sides (as a job on the NAS) and re-sorts the differences by content.
+    func checksumAll() async {
+        guard let (a, b) = compared else { return }
+        await checksum.start(a, b, title: "Checksum: \(a.breadcrumb)  ⇄  \(b.breadcrumb)") { [weak self] sums in self?.useChecksums(sums) }
+    }
+
+    func usePreviousChecksums() {
+        guard let (a, b) = compared, let j = ChecksumTracker.previous(a, b) else { return }
+        checksum.follow(j) { [weak self] sums in self?.useChecksums(sums) }
+    }
+
+    private func useChecksums(_ sums: ChecksumResults) {
+        var r = Comparison.Result(items: items, identical: identicalPaths)
+        checked = Comparison.apply(&r, ma: ma, mb: mb, sums: sums)
+        items = r.items
+        identicalPaths = r.identical
+        identicalCount = r.identical.count
+    }
+
     func setAction(_ action: UnifyAction, for ids: Set<String>) {
-        for idx in items.indices where ids.contains(items[idx].path) && items[idx].kind.allowed.contains(action) {
+        for idx in items.indices where ids.contains(items[idx].id) && items[idx].kind.allowed.contains(action) {
             items[idx].action = action
         }
     }
@@ -216,7 +237,7 @@ final class UnifyModel: ObservableObject {
             job.copies.append(CopyStep(from: a, to: b.fullPath, toHost: b.host, list: "a_to_b.list", backup: b.recycleDir(job: id), update: false))
         }
         if !p.toA.isEmpty {
-            job.lists["b_to_a.list"] = p.toA.map(\.path)
+            job.lists["b_to_a.list"] = p.toA.map { $0.bPath ?? $0.path }
             job.copies.append(CopyStep(from: b, to: a.fullPath, toHost: a.host, list: "b_to_a.list", backup: a.recycleDir(job: id), update: false))
         }
         if !p.recycleA.isEmpty {
@@ -239,7 +260,7 @@ final class UnifyModel: ObservableObject {
 
 struct UnifyView: View {
     var showJobs: () -> Void
-    @StateObject private var model = UnifyModel()
+    @ObservedObject var model: UnifyModel
     @EnvironmentObject var shares: ShareStore
     @EnvironmentObject var jobs: JobStore
 
@@ -277,6 +298,7 @@ struct UnifyView: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(model.a == nil || model.b == nil || model.busy || model.a == model.b)
             }
+            Spacer(minLength: 0)
         }
     }
 
@@ -333,7 +355,7 @@ struct UnifyView: View {
                 }
                 .textSelection(.enabled)
                 Spacer()
-                Button("Start Over") { model.compared = nil; model.items = []; selection = [] }
+                Button("Start Over") { model.compared = nil; model.items = []; model.checksum.reset(); selection = [] }
                 Button("Re-compare") { Task { await model.compare() } }.disabled(model.busy)
             }
 
@@ -356,7 +378,11 @@ struct UnifyView: View {
                 .frame(maxWidth: 320)
                 TextField("Search paths", text: $search).textFieldStyle(.roundedBorder).frame(maxWidth: 260)
                 Spacer()
-                if model.count(.likelySame) > 0 {
+                ChecksumControls(tracker: model.checksum, checked: model.checked,
+                                 hasPrevious: model.compared.map { ChecksumTracker.previous($0.0, $0.1) != nil } ?? false,
+                                 start: { Task { await model.checksumAll() } },
+                                 usePrevious: { model.usePreviousChecksums() })
+                if model.count(.likelySame) > 0 && model.checked == nil {
                     Button("Check contents of \(model.count(.likelySame)) same-size files") { Task { await model.checkContents() } }
                         .disabled(model.busy)
                         .help("Checksums them on both NASes. Identical ones drop off the list.")
@@ -364,7 +390,7 @@ struct UnifyView: View {
                 Menu("Set action for \(selection.isEmpty ? "all shown" : "\(selection.count) selected")") {
                     ForEach(UnifyAction.allCases) { act in
                         Button(act.label(A, B)) {
-                            model.setAction(act, for: selection.isEmpty ? Set(visible.map(\.path)) : selection)
+                            model.setAction(act, for: selection.isEmpty ? Set(visible.map(\.id)) : selection)
                         }
                     }
                 }
@@ -373,7 +399,13 @@ struct UnifyView: View {
 
             Table(visible, selection: $selection) {
                 TableColumn("Path") { i in
-                    Text(i.path).lineLimit(1).truncationMode(.middle).help(i.path)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(i.path).lineLimit(1).truncationMode(.middle).help(i.path)
+                        if let bp = i.bPath {
+                            Text("\(B): \(bp)\(i.verified ? "  ✓ checksums match" : "")")
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(bp)
+                        }
+                    }
                 }
                 .width(min: 240, ideal: 420)
                 TableColumn(A) { i in sideCell(i.a) }.width(min: 140, ideal: 170)
@@ -456,7 +488,40 @@ struct UnifyView: View {
     private func actionBinding(_ item: DiffItem) -> Binding<UnifyAction> {
         Binding(
             get: { item.action },
-            set: { model.setAction($0, for: [item.path]) }
+            set: { model.setAction($0, for: [item.id]) }
         )
+    }
+}
+
+/// "Checksum everything" for a comparison: start, progress, results. Shared by Unify and Retire.
+struct ChecksumControls: View {
+    @ObservedObject var tracker: ChecksumTracker
+    var checked: Comparison.Checked?
+    var hasPrevious: Bool
+    var start: () -> Void
+    var usePrevious: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let p = tracker.progress {
+                ProgressView().controlSize(.small)
+                Text(p).font(.callout).monospacedDigit()
+            } else if let c = checked {
+                Label("\(c.verified.formatted()) verified by checksum"
+                      + (c.damaged > 0 ? " · \(c.damaged) differ" : "")
+                      + (c.unreadable > 0 ? " · \(c.unreadable) unchecked" : ""),
+                      systemImage: c.damaged > 0 ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
+                    .foregroundStyle(c.damaged > 0 ? .red : .green)
+                    .help(c.unreadable > 0 ? "Unchecked files couldn't be read, or changed while being read." : "")
+            } else {
+                if hasPrevious {
+                    Button("Use Earlier Checksums") { usePrevious() }
+                        .help("Load the results of the last checksum run for these two folders (or keep waiting for it if it's still running)")
+                }
+                Button("Checksum Everything…") { start() }
+                    .help("Reads every file on both NASes (as a job, so you can keep working) and re-sorts the list by actual contents. Takes hours for terabytes.")
+            }
+            if let e = tracker.error { Text(e).foregroundStyle(.red).font(.caption).lineLimit(2) }
+        }
     }
 }

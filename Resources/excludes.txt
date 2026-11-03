@@ -11,3 +11,5 @@ _NAS Mover Recycle/
 .DS_Store
 ._*
 Thumbs.db
+.streams/
+.nasmover-staging-*/

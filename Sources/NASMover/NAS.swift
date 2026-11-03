@@ -14,6 +14,23 @@ struct RecycleStep {
     var root: String          // folder the list is relative to (or the folder to recycle)
     var dest: String
     var list: String?         // nil = recycle `root` itself
+    var contents = false      // recycle everything inside `root` (for a share root, which can't move itself)
+}
+
+/// Retire: files copied into a staging folder, then placed beside the live ones as "name<suffix>.ext".
+struct BesideStep {
+    var host: HostID
+    var staging: String
+    var dest: String
+    var suffix: String
+    var list: String          // list file in the job folder
+}
+
+/// Retire: before recycling, the stale folder must still match what was checked.
+struct RetireCheck {
+    var host: HostID
+    var root: String
+    var expected: [String: FileEntry]
 }
 
 struct JobSpec {
@@ -30,6 +47,10 @@ struct JobSpec {
     var verifyFolder: String?
     /// Empty job: absolute paths inside a _NAS Mover Recycle folder to delete permanently.
     var purge: [String] = []
+    /// Checksum job: MD5 every file in both folders.
+    var audit: (a: Location, b: Location)?
+    var beside: BesideStep?
+    var retireCheck: RetireCheck?
 }
 
 struct FileEntry {
@@ -317,6 +338,17 @@ enum NAS {
         if !job.purge.isEmpty {
             env.append(("PURGE_LIST", dir + "/purge.list"))
         }
+        if let (a, b) = job.audit {
+            env += [("AUDIT_A_HOST", a.host.rawValue), ("AUDIT_A", a.fullPath),
+                    ("AUDIT_B_HOST", b.host.rawValue), ("AUDIT_B", b.fullPath)]
+        }
+        if let s = job.beside {
+            env += [("BESIDE_HOST", s.host.rawValue), ("BESIDE_STAGING", s.staging), ("BESIDE_DEST", s.dest),
+                    ("BESIDE_SUFFIX", s.suffix), ("BESIDE_LIST", dir + "/" + s.list)]
+        }
+        if let r = job.retireCheck {
+            env += [("RETIRE_HOST", r.host.rawValue), ("RETIRE_ROOT", r.root), ("RETIRE_EXPECT", dir + "/retire_expect.tsv")]
+        }
         for (i, c) in job.copies.enumerated() {
             let n = i + 1
             env += [
@@ -335,7 +367,7 @@ enum NAS {
                 ("RECYCLE\(n)_HOST", r.host.rawValue),
                 ("RECYCLE\(n)_ROOT", r.root),
                 ("RECYCLE\(n)_DEST", r.dest),
-                ("RECYCLE\(n)_LIST", r.list.map { dir + "/" + $0 } ?? "SELF"),
+                ("RECYCLE\(n)_LIST", r.contents ? "CONTENTS" : r.list.map { dir + "/" + $0 } ?? "SELF"),
             ]
         }
         let envText = env.map { "\($0.0)=\(shq($0.1))" }.joined(separator: "\n") + "\n"
@@ -347,6 +379,9 @@ enum NAS {
         try await put("title", job.title + "\n")
         try await put("total", "\(job.totalFiles) \(job.totalBytes)\n")
         if !job.purge.isEmpty { try await put("purge.list", job.purge.joined(separator: "\n") + "\n") }
+        if let r = job.retireCheck {
+            try await put("retire_expect.tsv", r.expected.map { "\($0.value.size)\t\($0.value.mtime)\t\($0.key)" }.joined(separator: "\n") + "\n")
+        }
         for (name, paths) in job.lists {
             try await put(name, paths.joined(separator: "\n") + "\n")
         }
@@ -395,6 +430,33 @@ enum NAS {
         }
     }
 
+    /// Results of a checksum job for each side: path -> (MD5, size and date when it was read).
+    /// Files that couldn't be read are simply absent.
+    static func auditHashes(_ h: HostID, job id: String) async throws -> ChecksumResults {
+        let dir = "~/.nasmover/jobs/" + shq(id)
+        @Sendable func load(_ tag: String) async throws -> [String: ChecksumResults.Entry] {
+            let hashes = try await SSH.check(target(h), "cat \(dir)/hash.\(tag)")
+            let stats = try await SSH.check(target(h), "cat \(dir)/stat.\(tag)")
+            var st: [Substring: FileEntry] = [:]
+            for line in stats.split(separator: "\n") {
+                let f = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+                guard f.count == 3, let size = Int64(f[0]), let mt = Int64(f[1]) else { continue }
+                st[f[2]] = FileEntry(size: size, mtime: mt)
+            }
+            var r: [String: ChecksumResults.Entry] = [:]
+            for line in hashes.split(separator: "\n") {
+                guard line.count > 33 else { continue }
+                let path = line.dropFirst(33)
+                guard let e = st[path] else { continue }
+                r[String(path)] = .init(md5: String(line.prefix(32)), file: e)
+            }
+            return r
+        }
+        async let a = load("a")
+        async let b = load("b")
+        return try await ChecksumResults(a: a, b: b)
+    }
+
     static func cancel(_ job: JobInfo) async throws {
         let dir = "~/.nasmover/jobs/" + shq(job.id)
         _ = try await SSH.run(target(job.host), "kill -TERM $(cat \(dir)/pid) 2>/dev/null")
@@ -437,7 +499,7 @@ enum NAS {
     /// Lists every file under `loc` with size and modification time, keyed by relative path.
     static func index(_ loc: Location) async throws -> [String: FileEntry] {
         let prune = ["@Recycle", Share.recycleFolder, ".@__thumb", ".@upload_cache", ".@__qini", ".trashcan", ".TemporaryItems",
-                     ".Trashes", ".Spotlight-V100", ".fseventsd", "ascmhl"]
+                     ".Trashes", ".Spotlight-V100", ".fseventsd", "ascmhl", ".streams", ".nasmover-staging-*"]
             .map { "-name \(shq($0))" }.joined(separator: " -o ")
         let cmd = "cd \(shq(loc.fullPath)) && find . \\( \(prune) \\) -prune -o -type f ! -name .DS_Store ! -name '._*' ! -name Thumbs.db -exec stat -c '%s %Y %n' {} +"
         let r = try await SSH.run(target(loc.host), cmd)
