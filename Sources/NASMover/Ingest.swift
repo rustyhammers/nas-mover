@@ -335,6 +335,21 @@ final class IngestModel: ObservableObject {
     @Published var audioStatus: String?
     @Published var audioResult: String?
     @Published var history: [UUID: [String: [Int64]]] = [:]
+    /// Thumbnails per card / Mac source, keyed by id + total size so a changed card reloads.
+    @Published var previews: [String: [Preview]] = [:]
+    private var loadingPreviews = Set<String>()
+
+    func previews(for c: Card) async {
+        let key = c.id + "|\(c.bytes)"
+        guard previews[key] == nil, loadingPreviews.insert(key).inserted else { return }
+        previews[key] = await Previews.card(c)
+    }
+
+    func previews(for s: AudioSource) async {
+        let key = s.id + "|\(s.bytes)"
+        guard previews[key] == nil, loadingPreviews.insert(key).inserted else { return }
+        previews[key] = await Previews.local(s)
+    }
 
     func refresh() async {
         loading = true

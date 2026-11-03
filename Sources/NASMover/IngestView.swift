@@ -31,7 +31,8 @@ struct IngestView: View {
                         Text("No cards in the QNAP's readers.").foregroundStyle(.secondary).padding(8)
                     }
                     ForEach(model.cards) { c in
-                        CardRow(card: c, state: model.states[c.mount]) { Task { await check(c) } }
+                        CardRow(card: c, state: model.states[c.mount], previews: model.previews[c.id + "|\(c.bytes)"]) { Task { await check(c) } }
+                            .task(id: c.id + "|\(c.bytes)") { await model.previews(for: c) }
                         Divider()
                     }
                 }
@@ -43,12 +44,16 @@ struct IngestView: View {
                         Text("No recorders, cameras or cards with footage plugged into this Mac.").foregroundStyle(.secondary)
                     }
                     ForEach(model.audio) { a in
-                        HStack {
-                            Image(systemName: "waveform").foregroundStyle(.blue)
-                            Text(a.name).font(.body.weight(.medium))
-                            Text("\(a.files.count) files · \(fmtBytes(a.bytes))").foregroundStyle(.secondary)
-                            Spacer()
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: "waveform").foregroundStyle(.blue)
+                                Text(a.name).font(.body.weight(.medium))
+                                Text("\(a.files.count) files · \(fmtBytes(a.bytes))").foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                            PreviewStrip(previews: model.previews[a.id + "|\(a.bytes)"], height: 48)
                         }
+                        .task(id: a.id + "|\(a.bytes)") { await model.previews(for: a) }
                     }
                 }
                 .padding(4)
@@ -93,6 +98,7 @@ struct IngestView: View {
 struct CardRow: View {
     var card: Card
     var state: CardState?
+    var previews: [Preview]?
     var check: () -> Void
 
     var body: some View {
@@ -104,6 +110,7 @@ struct CardRow: View {
                     .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
                     .font(.callout).foregroundStyle(.secondary)
                 badge
+                PreviewStrip(previews: previews, height: 64)
             }
             Spacer()
             switch state {
@@ -218,6 +225,7 @@ struct IngestSheet: View {
                             VStack(alignment: .leading) {
                                 Text(c.name).font(.body.weight(.medium))
                                 Text("\(c.summary) · \(fmtBytes(c.bytes))").font(.caption).foregroundStyle(.secondary)
+                                PreviewStrip(previews: model.previews[c.id + "|\(c.bytes)"], height: 40)
                             }
                             Spacer()
                             Picker("", selection: binding($roles, c.id)) {
@@ -233,6 +241,7 @@ struct IngestSheet: View {
                             VStack(alignment: .leading) {
                                 Text("\(a.name) (this Mac)").font(.body.weight(.medium))
                                 Text("\(a.files.count) files · \(fmtBytes(a.bytes))").font(.caption).foregroundStyle(.secondary)
+                                PreviewStrip(previews: model.previews[a.id + "|\(a.bytes)"], height: 40)
                             }
                             Spacer()
                             Picker("", selection: binding($audioDest, a.id)) {
@@ -244,7 +253,7 @@ struct IngestSheet: View {
                     }
                 }
             }
-            .frame(minHeight: 120, maxHeight: 260)
+            .frame(minHeight: 140, maxHeight: 340)
 
             Divider()
             HStack {
@@ -542,5 +551,31 @@ struct LinesField: View {
             .onChange(of: text) { _, t in
                 lines = t.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
             }
+    }
+}
+
+/// A row of thumbnails sampled across a card's timeline, so cameras are easy to tell apart.
+struct PreviewStrip: View {
+    var previews: [Preview]?
+    var height: CGFloat
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let previews {
+                if previews.isEmpty { Text("No preview").font(.caption).foregroundStyle(.tertiary) }
+                ForEach(previews) { p in
+                    Image(nsImage: p.image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: height * min(2, max(0.5, p.image.size.width / max(1, p.image.size.height))), height: height)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .help(p.name + (p.date.map { " · " + $0.formatted(date: .abbreviated, time: .shortened) } ?? ""))
+                }
+            } else {
+                ProgressView().controlSize(.small)
+                Text("Loading previews…").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .frame(height: height, alignment: .leading)
     }
 }
