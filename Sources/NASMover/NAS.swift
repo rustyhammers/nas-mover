@@ -7,6 +7,8 @@ struct CopyStep {
     var list: String?         // name of a list file in the job folder; nil = whole folder
     var backup: String        // recycle folder on the receiving side for overwritten files
     var update: Bool          // never overwrite newer destination files
+    var flat = false          // Ingest: listed card files land directly in `to`, checked by file name
+    var card: String? = nil   // Ingest: card name for the ledger
 }
 
 struct RecycleStep {
@@ -51,6 +53,10 @@ struct JobSpec {
     var audit: (a: Location, b: Location)?
     var beside: BesideStep?
     var retireCheck: RetireCheck?
+    /// Ingest: the shoot folder; verified card files are recorded in the ingest ledger.
+    var ingestShoot: String?
+    /// Card check job: card files to look for (by name and MD5) in `search`.
+    var cardCheck: (card: Card, list: String, search: Location)?
 }
 
 struct FileEntry {
@@ -349,6 +355,13 @@ enum NAS {
         if let r = job.retireCheck {
             env += [("RETIRE_HOST", r.host.rawValue), ("RETIRE_ROOT", r.root), ("RETIRE_EXPECT", dir + "/retire_expect.tsv")]
         }
+        if let shoot = job.ingestShoot {
+            env += [("INGEST_LEDGER", home + "/" + NAS.ledgerPath), ("INGEST_SHOOT", shoot)]
+        }
+        if let c = job.cardCheck {
+            env += [("CC_ROOT", c.card.mount), ("CC_LIST", dir + "/" + c.list), ("CC_SEARCH", c.search.fullPath),
+                    ("CC_SEARCH_NAME", c.search.breadcrumb), ("CC_CARD", c.card.name), ("INGEST_LEDGER", home + "/" + NAS.ledgerPath)]
+        }
         for (i, c) in job.copies.enumerated() {
             let n = i + 1
             env += [
@@ -359,6 +372,8 @@ enum NAS {
                 ("COPY\(n)_LIST", c.list.map { dir + "/" + $0 } ?? "ALL"),
                 ("COPY\(n)_BACKUP", c.backup),
                 ("COPY\(n)_UPDATE", c.update ? "1" : "0"),
+                ("COPY\(n)_FLAT", c.flat ? "1" : "0"),
+                ("COPY\(n)_CARD", c.card ?? ""),
             ]
         }
         for (i, r) in job.recycles.enumerated() {

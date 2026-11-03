@@ -50,6 +50,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     case transfer = "Copy / Move"
     case unify = "Unify"
     case retire = "Retire"
+    case ingest = "Ingest"
     case verify = "Verify"
     case browse = "Browse"
     case jobs = "Jobs"
@@ -59,6 +60,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .transfer: return "arrow.right.doc.on.clipboard"
         case .unify: return "arrow.triangle.merge"
         case .retire: return "archivebox"
+        case .ingest: return "sdcard"
         case .verify: return "checkmark.seal"
         case .browse: return "folder"
         case .jobs: return "list.bullet.rectangle"
@@ -74,6 +76,8 @@ struct ContentView: View {
     // Kept here so a comparison (and a checksum running for it) survives switching tabs.
     @StateObject private var unify = UnifyModel()
     @StateObject private var retire = RetireModel()
+    @StateObject private var ingest = IngestModel()
+    @StateObject private var templates = TemplateStore()
 
     var body: some View {
         NavigationSplitView {
@@ -102,6 +106,7 @@ struct ContentView: View {
             case .transfer: TransferView(showJobs: { section = .jobs })
             case .unify: UnifyView(showJobs: { section = .jobs }, model: unify)
             case .retire: RetireView(showJobs: { section = .jobs }, model: retire)
+            case .ingest: IngestView(showJobs: { section = .jobs }, model: ingest, templates: templates)
             case .verify: VerifyView(showJobs: { section = .jobs })
             case .browse: BrowseView(showJobs: { section = .jobs })
             case .jobs: JobsView()

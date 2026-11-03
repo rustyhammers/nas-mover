@@ -24,8 +24,14 @@
 #   RETIRE_HOST RETIRE_ROOT RETIRE_EXPECT
 #                  Before recycling, refuse unless ROOT still matches EXPECT (size TAB mtime TAB path) exactly
 #   RECYCLEn_LIST  may also be CONTENTS: move everything inside ROOT (a share root can't move itself)
+#   COPYn_FLAT     1 = Ingest: the listed card files all land directly in TO (no card folders), checked by file name
+#   COPYn_CARD     Ingest: the card's display name, for the ledger
+#   INGEST_LEDGER INGEST_SHOOT
+#                  Ingest: after verifying, record every card file (size, date, name, MD5, where it went) in the ledger
+#   CC_ROOT CC_LIST CC_SEARCH CC_SEARCH_NAME CC_CARD
+#                  Card check job: is every listed card file in CC_SEARCH with the same MD5? (safe to format)
 
-TOOL_VERSION=1.2
+TOOL_VERSION=1.3
 J="$1"
 cd "$J" || exit 1
 . ./job.env
@@ -98,9 +104,10 @@ bin_root() { # ".../_NAS Mover Recycle/<job>/..." -> ".../_NAS Mover Recycle", s
 }
 
 load_copy() {
-	eval "fh=\$COPY${1}_FROM_HOST fp=\$COPY${1}_FROM th=\$COPY${1}_TO_HOST tp=\$COPY${1}_TO list=\$COPY${1}_LIST bk=\$COPY${1}_BACKUP upd=\$COPY${1}_UPDATE"
+	eval "fh=\$COPY${1}_FROM_HOST fp=\$COPY${1}_FROM th=\$COPY${1}_TO_HOST tp=\$COPY${1}_TO list=\$COPY${1}_LIST bk=\$COPY${1}_BACKUP upd=\$COPY${1}_UPDATE flat=\$COPY${1}_FLAT"
 	opts=""
 	[ "$upd" = 1 ] && opts="-u"
+	[ "$flat" = 1 ] && opts="$opts --no-relative"
 	src=$(spec "$fh" "$fp/")
 	dst=$(spec "$th" "$tp/")
 }
@@ -347,15 +354,27 @@ verify_op() { # n: MD5 both sides, compare; writes mismatch.n
 	load_copy $1
 	l=""
 	[ "$list" = ALL ] || l="$list"
+	dl="$l"
+	if [ "$flat" = 1 ]; then
+		sed 's|.*/||' "$list" > flat.$1
+		dl=flat.$1
+	fi
 	hash_tree "$fh" "$fp" s$1 "$l" &
 	a=$!
-	hash_tree "$th" "$tp" d$1 "$l" &
+	hash_tree "$th" "$tp" d$1 "$dl" &
 	b=$!
 	ok=0
 	wait $a || { echo "could not hash every source file (see err.hash.s$1)" > mismatch.$1; ok=1; }
 	wait $b || { echo "could not hash every destination file (see err.hash.d$1)" >> mismatch.$1; ok=1; }
 	[ $ok = 0 ] || return 1
-	compare_hashes s$1 d$1 "$upd" > mismatch.$1
+	if [ "$flat" = 1 ]; then
+		# The card's folders were dropped on the way, so compare by file name.
+		awk -F'\t' -v OFS='\t' '{ n = $2; sub(/.*\//, "", n); print $1, n }' hash.s$1 > hash.f$1
+		awk -F'\t' -v OFS='\t' '{ n = $3; sub(/.*\//, "", n); print $1, $2, n }' stat.s$1 > stat.f$1
+		compare_hashes f$1 d$1 "$upd" > mismatch.$1
+	else
+		compare_hashes s$1 d$1 "$upd" > mismatch.$1
+	fi
 	[ ! -s mismatch.$1 ]
 }
 
@@ -443,6 +462,59 @@ verify_folder() {
 	else
 		finish done "$ok files verified ($mod modified, $nw new since last manifest)"
 	fi
+}
+
+# --- Ingest ----------------------------------------------------------------------
+
+# Records each verified card file: size, date, name, MD5, where it went, shoot, card, day.
+ledger_add() { # n
+	load_copy $1
+	[ "$flat" = 1 ] || return 0
+	mkdir -p "$(dirname "$INGEST_LEDGER")"
+	eval "card=\$COPY${1}_CARD"
+	awk -F'\t' -v OFS='\t' -v dest="$tp" -v shoot="$INGEST_SHOOT" -v card="$card" -v when="$(date +%F)" '
+		FILENAME == ARGV[1] { h[$2] = $1; next }
+		($3 in h) { n = $3; sub(/.*\//, "", n); print $1, $2, n, h[$3], dest "/" n, shoot, card, when }' hash.s$1 stat.s$1 >> "$INGEST_LEDGER"
+}
+
+# Safe to format? Every listed card file must have a copy in CC_SEARCH with the same name and MD5.
+card_check() {
+	say "Hashing the card (MD5)"
+	hash_tree "$RUNNER" "$CC_ROOT" cc "$CC_LIST" || finish failed "Couldn't read every file on the card (see log). NOT safe to format."
+	say "Looking for copies in $CC_SEARCH_NAME"
+	(
+		cd "$CC_SEARCH" || exit 1
+		find . \( -name @Recycle -o -name "_NAS Mover Recycle" -o -name .streams -o -name ascmhl -o -name .@__thumb -o -name '.nasmover-staging-*' \) -prune \
+			-o -type f -print | sed 's|^\./||' | tr '\n' '\0' | xargs -0 -r stat -c '%s %n'
+	) > cc.all 2>> err.cc
+	# Candidates: same name and size as a card file.
+	awk -F'\t' 'FILENAME == ARGV[1] { n = $3; sub(/.*\//, "", n); want[n "/" $1] = 1; next }
+		{ size = $0; sub(/ .*/, "", size); p = $0; sub(/^[0-9]+ /, "", p); n = p; sub(/.*\//, "", n); if ((n "/" size) in want) print p }' stat.cc cc.all > cc.cand
+	: > hash.cand
+	: > stat.cand
+	if [ -s cc.cand ]; then
+		say "Hashing the matching files in $CC_SEARCH_NAME"
+		hash_tree "$RUNNER" "$CC_SEARCH" cand cc.cand
+	fi
+	mkdir -p "$(dirname "$INGEST_LEDGER")"
+	awk -F'\t' -v OFS='\t' -v root="$CC_SEARCH" -v card="$CC_CARD" -v when="$(date +%F)" -v led="$INGEST_LEDGER" '
+		FILENAME == ARGV[1] { n = $2; sub(/.*\//, "", n); have[n "/" $1] = $2; next }
+		FILENAME == ARGV[2] { sz[$3] = $1; mt[$3] = $2; next }
+		{
+			n = $2; sub(/.*\//, "", n)
+			if ((n "/" $1) in have) {
+				ok++
+				p = have[n "/" $1]; shoot = p; sub(/\/[^\/]*$/, "", shoot)
+				print sz[$2], mt[$2], n, $1, root "/" p, root "/" shoot, card, when >> led
+			} else { miss++; print $2 > "cc.missing" }
+		}
+		END { printf "%d %d\n", ok, miss > "cc.counts" }' hash.cand stat.cc hash.cc
+	set -- $(cat cc.counts)
+	total=$(($1 + $2))
+	if [ "$2" -gt 0 ]; then
+		finish failed "NOT safe to format: $2 of $total files have no matching copy in $CC_SEARCH_NAME (list in log)"
+	fi
+	finish done "Safe to format: all $total files have a verified copy in $CC_SEARCH_NAME"
 }
 
 # --- Checksum two folders (Unify / Retire) -----------------------------------
@@ -572,6 +644,9 @@ PROG=$!
 [ -n "$VF_PATH" ] && verify_folder
 [ -n "$PURGE_LIST" ] && { kill $PROG 2>/dev/null; purge; }
 [ -n "$AUDIT_A" ] && audit
+[ -n "$CC_ROOT" ] && card_check
+# Ingested files follow the share's default (rw for everyone), like files saved over SMB.
+[ -n "$INGEST_LEDGER" ] && umask 000
 
 n=1
 while eval "[ -n \"\$COPY${n}_FROM\" ]"; do
@@ -596,10 +671,18 @@ if [ "$VERIFY" = 1 ]; then
 	n=1
 	while eval "[ -n \"\$COPY${n}_FROM\" ]"; do
 		load_copy $n
-		if [ "$list" = ALL ]; then
+		if [ "$list" = ALL ] || [ "$flat" = 1 ]; then
 			say "Writing ASC MHL manifest"
 			write_mhl "$th" "$tp" d$n transfer original || warn=" (but the MHL manifest couldn't be written)"
 		fi
+		n=$((n + 1))
+	done
+fi
+
+if [ -n "$INGEST_LEDGER" ]; then
+	n=1
+	while eval "[ -n \"\$COPY${n}_FROM\" ]"; do
+		ledger_add $n
 		n=$((n + 1))
 	done
 fi

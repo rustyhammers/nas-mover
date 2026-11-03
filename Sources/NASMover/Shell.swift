@@ -59,7 +59,21 @@ enum SSH {
         ], target: target, command: "(password login) " + command, stdin: stdin, env: env)
     }
 
-    private static func launch(_ args: [String], target: String, command: String, stdin: Data?, env: [String: String]? = nil) async throws -> CommandResult {
+    /// Runs `command` on `target` with a local file streamed to its stdin (for copying files up without loading them into memory).
+    static func run(_ target: String, _ command: String, stdinFile: URL) async throws -> CommandResult {
+        try await launch([
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=8",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPath=\(localDir.path)/cm-%C",
+            "-o", "ControlPersist=300",
+            target, command,
+        ], target: target, command: command, stdin: nil, stdinFile: stdinFile)
+    }
+
+    private static func launch(_ args: [String], target: String, command: String, stdin: Data?, env: [String: String]? = nil, stdinFile: URL? = nil) async throws -> CommandResult {
         try await withCheckedThrowingContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 let p = Process()
@@ -69,7 +83,11 @@ enum SSH {
                 let outPipe = Pipe(), errPipe = Pipe(), inPipe = Pipe()
                 p.standardOutput = outPipe
                 p.standardError = errPipe
-                p.standardInput = inPipe
+                if let stdinFile, let h = try? FileHandle(forReadingFrom: stdinFile) {
+                    p.standardInput = h
+                } else {
+                    p.standardInput = inPipe
+                }
                 do { try p.run() } catch {
                     cont.resume(throwing: SSHError(message: "Could not start ssh: \(error.localizedDescription)"))
                     return
