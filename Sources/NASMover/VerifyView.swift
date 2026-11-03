@@ -15,7 +15,6 @@ struct VerifyView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Re-reads every file in a folder, computes its MD5, and compares it with the folder's ASC MHL history (the ascmhl folder that Copy, Move and tools like Hedge or Silverstack write). Each check is recorded as a new generation in that history.")
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
 
             LocationPicker(title: "Folder to verify", location: $folder, defaultHost: .unas)
                 .frame(maxWidth: 640, alignment: .topLeading)

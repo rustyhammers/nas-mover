@@ -224,7 +224,6 @@ struct RetireView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("For a copy you've stopped using. Retire checksums both sides, brings over anything from the stale copy that the live copy is missing or that differs, verifies it, and then moves the stale copy to “_NAS Mover Recycle”. Nothing on the live side is ever overwritten unless you choose to.")
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading) {
                     LocationPicker(title: "Stale copy (to retire)", location: $model.stale, defaultHost: .qnap)
