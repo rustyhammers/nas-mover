@@ -47,7 +47,9 @@ enum Setup {
         let qpub = try await SSH.check(qnap, "[ -f ~/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N '' -C nas-mover-qnap -f ~/.ssh/id_ed25519; cat ~/.ssh/id_ed25519.pub")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         // 2. Trust it on the UNAS, and read the UNAS's own host key and addresses (authoritative, no scanning).
-        _ = try await SSH.check(unas, "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && K=$(cat) && (grep -qxF \"$K\" ~/.ssh/authorized_keys || echo \"$K\" >> ~/.ssh/authorized_keys)",
+        // Skip it if the key is already there in any form: NAS.secureUnasLink() keeps it restricted
+        // (QNAP address only, gate as its only command), and re-adding it plain would undo that.
+        _ = try await SSH.check(unas, "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && K=$(cat) && set -- $K && (grep -qF -- \"$2\" ~/.ssh/authorized_keys || echo \"$K\" >> ~/.ssh/authorized_keys)",
                                 stdin: Data((qpub + "\n").utf8))
         let hostKey = try await SSH.check(unas, "cat /etc/ssh/ssh_host_ed25519_key.pub").split(separator: " ").prefix(2).joined(separator: " ")
         let ips = try await SSH.check(unas, "hostname -I 2>/dev/null || hostname -i").split(separator: " ")

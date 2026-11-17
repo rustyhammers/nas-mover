@@ -31,7 +31,7 @@ fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN" "$APP/Contents/MacOS/NAS Mover"
-cp Resources/runner.sh Resources/excludes.txt Resources/AppIcon.icns "$APP/Contents/Resources/"
+cp Resources/runner.sh Resources/nm-helper.sh Resources/unas-gate.sh Resources/excludes.txt Resources/AppIcon.icns "$APP/Contents/Resources/"
 SPARKLE=$(find .build/artifacts -type d -path "*Sparkle.xcframework/macos-*/Sparkle.framework" | head -1)
 ditto "$SPARKLE" "$APP/Contents/Frameworks/Sparkle.framework"
 

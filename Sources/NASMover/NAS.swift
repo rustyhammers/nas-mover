@@ -79,8 +79,17 @@ enum NAS {
     static let rsh = "ssh -o BatchMode=yes -o ServerAliveInterval=30 -c aes128-gcm@openssh.com"
 
     /// rsync path for `path` on `host`, as seen from `runner` (unquoted).
+    /// Remote paths are backslash-escaped rather than sent with -s: the UNAS runs rsync through
+    /// rrsync (unas-gate.sh), which must see the paths, and escaping also works without the gate.
     static func spec(_ host: HostID, _ path: String, runner: HostID) -> String {
-        host == runner ? path : settings.unasFromQnap + ":" + path
+        host == runner ? path : settings.unasFromQnap + ":" + rsyncEscape(path)
+    }
+
+    static func rsyncEscape(_ path: String) -> String {
+        let special = Set(" !\"#$&'()*,;<=>?[\\]^`{|}~")
+        var out = ""
+        for c in path { if special.contains(c) { out.append("\\") }; out.append(c) }
+        return out
     }
 
     // MARK: Setup
@@ -90,16 +99,53 @@ enum NAS {
     static func ensureInstalled(_ h: HostID) async throws -> String {
         if let home = homes[h] { return home }
         guard let runner = Bundle.main.url(forResource: "runner", withExtension: "sh"),
-              let excludes = Bundle.main.url(forResource: "excludes", withExtension: "txt") else {
-            throw SSHError(message: "App resources are missing (runner.sh / excludes.txt).")
+              let excludes = Bundle.main.url(forResource: "excludes", withExtension: "txt"),
+              let helper = Bundle.main.url(forResource: "nm-helper", withExtension: "sh") else {
+            throw SSHError(message: "App resources are missing (runner.sh / excludes.txt / nm-helper.sh).")
         }
         let t = target(h)
         // Write to a temp file and rename: a running job keeps reading its own copy of the old script.
         _ = try await SSH.check(t, "mkdir -p ~/.nasmover/jobs ~/.nasmover/tmp && cat > ~/.nasmover/runner.sh.new && mv ~/.nasmover/runner.sh.new ~/.nasmover/runner.sh", stdin: try Data(contentsOf: runner))
         _ = try await SSH.check(t, "cat > ~/.nasmover/excludes.txt.new && mv ~/.nasmover/excludes.txt.new ~/.nasmover/excludes.txt", stdin: try Data(contentsOf: excludes))
+        _ = try await SSH.check(t, "cat > ~/.nasmover/nm-helper.sh.new && mv ~/.nasmover/nm-helper.sh.new ~/.nasmover/nm-helper.sh", stdin: try Data(contentsOf: helper))
         let home = try await SSH.check(t, "echo $HOME").trimmingCharacters(in: .whitespacesAndNewlines)
+        // Jobs on the QNAP reach the UNAS with the QNAP's key: make sure that key is still locked
+        // down (a UNAS firmware update could undo it) and the UNAS side has the helper and gate.
+        if h == .qnap && settings.isConfigured { try await secureUnasLink() }
         homes[h] = home
         return home
+    }
+
+    /// Installs nm-helper.sh and unas-gate.sh on the UNAS (with the Mac's own key) and restricts the
+    /// QNAP's key in the UNAS's authorized_keys to: the QNAP's address, no terminal or forwarding,
+    /// and the gate as its only command. Idempotent; the file is only rewritten when it changes.
+    static func secureUnasLink() async throws {
+        guard let helper = Bundle.main.url(forResource: "nm-helper", withExtension: "sh"),
+              let gate = Bundle.main.url(forResource: "unas-gate", withExtension: "sh") else {
+            throw SSHError(message: "App resources are missing (nm-helper.sh / unas-gate.sh).")
+        }
+        let u = target(.unas), q = target(.qnap)
+        _ = try await SSH.check(u, "mkdir -p ~/.nasmover && chmod 700 ~/.nasmover && cat > ~/.nasmover/nm-helper.sh.new && mv ~/.nasmover/nm-helper.sh.new ~/.nasmover/nm-helper.sh", stdin: try Data(contentsOf: helper))
+        _ = try await SSH.check(u, "cat > ~/.nasmover/unas-gate.sh.new && chmod 700 ~/.nasmover/unas-gate.sh.new && mv ~/.nasmover/unas-gate.sh.new ~/.nasmover/unas-gate.sh", stdin: try Data(contentsOf: gate))
+        // First install only: every current share is writable, so nothing that worked before stops working.
+        _ = try await SSH.check(u, "[ -f ~/.nasmover/writable-shares ] || for d in /volume/*/.srv/.unifi-drive/*/.data; do basename \"$(dirname \"$d\")\"; done > ~/.nasmover/writable-shares; exit 0")
+        let qpub = try await SSH.check(q, "cat ~/.ssh/id_ed25519.pub").trimmingCharacters(in: .whitespacesAndNewlines)
+        let unasIP = settings.unasFromQnap.split(separator: "@").last.map(String.init) ?? settings.unasFromQnap
+        let ip = try await SSH.check(q, "ip route get \(shq(unasIP)) 2>/dev/null | sed -n 's/.* src \\([0-9.]*\\).*/\\1/p' | head -1")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ip.split(separator: ".").count == 4, ip.allSatisfy({ $0.isNumber || $0 == "." }) else {
+            throw SSHError(message: "Couldn't tell which address the QNAP uses to reach the UNAS.")
+        }
+        let lock = """
+        K=$(cat); set -- $K; B=$2; [ -n "$B" ] || exit 1
+        L="from=\\"\(ip)\\",restrict,command=\\"$HOME/.nasmover/unas-gate.sh\\" $K"
+        cd ~/.ssh && touch authorized_keys || exit 1
+        awk -v b="$B" -v l="$L" '{ hit = 0; for (i = 1; i <= NF; i++) if ($i == b) hit = 1; if (hit) { if (!d) print l; d = 1 } else print } END { if (!d) print l }' authorized_keys > authorized_keys.nm-new || exit 1
+        if cmp -s authorized_keys authorized_keys.nm-new; then rm -f authorized_keys.nm-new; exit 0; fi
+        [ -f authorized_keys.nasmover-orig ] || cp -p authorized_keys authorized_keys.nasmover-orig
+        chmod 600 authorized_keys.nm-new && mv authorized_keys.nm-new authorized_keys
+        """
+        _ = try await SSH.check(u, lock, stdin: Data((qpub + "\n").utf8))
     }
 
     // MARK: Browsing
@@ -298,7 +344,7 @@ enum NAS {
         let s = shq(spec(src.host, src.fullPath + "/", runner: runner))
         let d = shq(spec(dstParent.host, dst + "/", runner: runner))
         @Sendable func cmd(_ update: Bool) -> String {
-            "rsync -rlt -s -n \(update ? "-u" : "") --stats --exclude-from=\(shq(home + "/.nasmover/excludes.txt")) --out-format='%i|%l|%n' -e \(shq(rsh)) \(s) \(d)"
+            "rsync -rlt -n \(update ? "-u" : "") --stats --exclude-from=\(shq(home + "/.nasmover/excludes.txt")) --out-format='%i|%l|%n' -e \(shq(rsh)) \(s) \(d)"
         }
         let t = target(runner)
         async let planned = SSH.run(t, cmd(true))
@@ -574,7 +620,7 @@ enum NAS {
         _ = try await SSH.check(t, "cat > \(shq(listPath))", stdin: Data((paths.joined(separator: "\n") + "\n").utf8))
         let s = shq(spec(a.host, a.fullPath + "/", runner: runner))
         let d = shq(spec(b.host, b.fullPath + "/", runner: runner))
-        let r = try await SSH.run(t, "rsync -rlt -s -n -c --files-from=\(shq(listPath)) --out-format='%i|%n' -e \(shq(rsh)) \(s) \(d); rc=$?; rm -f \(shq(listPath)); exit $rc")
+        let r = try await SSH.run(t, "rsync -rlt -n -c --files-from=\(shq(listPath)) --out-format='%i|%n' -e \(shq(rsh)) \(s) \(d); rc=$?; rm -f \(shq(listPath)); exit $rc")
         if !dryRunOK(r) {
             throw SSHError(message: "Checksum comparison failed: \(r.err)")
         }

@@ -31,7 +31,7 @@
 #   CC_ROOT CC_LIST CC_SEARCH CC_SEARCH_NAME CC_CARD
 #                  Card check job: is every listed card file in CC_SEARCH with the same MD5? (safe to format)
 
-TOOL_VERSION=1.3
+TOOL_VERSION=1.4
 J="$1"
 cd "$J" || exit 1
 . ./job.env
@@ -40,7 +40,10 @@ echo $$ > pid
 RSH="ssh -o BatchMode=yes -o ServerAliveInterval=30 -c aes128-gcm@openssh.com"
 # --whole-file: on a LAN, sending whole files beats rsync's delta algorithm.
 # --progress: lets update_progress count bytes inside files that are still copying.
-RS="rsync -rlt -s -W --progress --exclude-from=$EXCLUDES"
+# No -s: the UNAS side runs rsync through rrsync (unas-gate.sh), which must see the paths.
+# Remote paths are backslash-escaped instead (esc), which works with or without the gate.
+RS="rsync -rlt -W --progress --exclude-from=$EXCLUDES"
+NMH="$(cd "$(dirname "$0")" && pwd)/nm-helper.sh"
 TAB=$(printf '\t')
 
 say() { echo "$*" > phase; echo "$(date '+%F %T') $*" >> events.log; }
@@ -54,11 +57,17 @@ finish() { # state result
 	exit 0
 }
 q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
-spec() { # host path -> rsync path
-	if [ "$1" = "$RUNNER" ]; then printf '%s' "$2"; else printf '%s:%s' "$UNAS_SSH" "$2"; fi
+esc() { # backslash-escape shell-special ASCII for a remote rsync path (bytes >= 0x80 pass through)
+	printf '%s' "$1" | awk 'BEGIN { sp = " !\"#$&\047()*,;<=>?[\\]^`{|}~" } {
+		out = ""; n = length($0)
+		for (i = 1; i <= n; i++) { c = substr($0, i, 1); if (index(sp, c)) out = out "\\" c; else out = out c }
+		printf "%s%s", (NR > 1 ? "\n" : ""), out }'
 }
-on() { # host; runs the script on stdin there
-	if [ "$1" = "$RUNNER" ]; then sh -s; else $RSH "$UNAS_SSH" sh -s; fi
+spec() { # host path -> rsync path
+	if [ "$1" = "$RUNNER" ]; then printf '%s' "$2"; else printf '%s:%s' "$UNAS_SSH" "$(esc "$2")"; fi
+}
+nm() { # host verb: runs a fixed nm-helper.sh operation there; parameters and payload on stdin
+	if [ "$1" = "$RUNNER" ]; then sh "$NMH" "$2"; else $RSH "$UNAS_SSH" "sh .nasmover/nm-helper.sh $2"; fi
 }
 # progress = "<files done> <bytes done>", including the part of each worker's current file already sent.
 # Each worker log interleaves our --out-format lines (flags|size|path) with rsync's \r-separated --progress lines.
@@ -88,15 +97,7 @@ update_progress() {
 progress_loop() { while :; do update_progress; sleep 2; done; }
 
 fix_unas_perms() { # path on the UNAS: hand root-written items to the UniFi Drive owner
-	{
-		printf 'P=%s\nO=%s\n' "$(q "$1")" "$(q "$UNAS_OWNER")"
-		cat <<'EOS'
-[ -e "$P" ] || exit 0
-find "$P" -user root -type d -exec chmod 770 {} +
-find "$P" -user root -type f -exec chmod 660 {} +
-[ -n "$O" ] && find "$P" -user root -exec chown -h "$O" {} +
-EOS
-	} | on unas
+	printf '%s\n%s\n' "$1" "$UNAS_OWNER" | nm unas perms
 }
 
 bin_root() { # ".../_NAS Mover Recycle/<job>/..." -> ".../_NAS Mover Recycle", so folders mkdir created get fixed too
@@ -104,6 +105,7 @@ bin_root() { # ".../_NAS Mover Recycle/<job>/..." -> ".../_NAS Mover Recycle", s
 }
 
 load_copy() {
+	ci=$1
 	eval "fh=\$COPY${1}_FROM_HOST fp=\$COPY${1}_FROM th=\$COPY${1}_TO_HOST tp=\$COPY${1}_TO list=\$COPY${1}_LIST bk=\$COPY${1}_BACKUP upd=\$COPY${1}_UPDATE flat=\$COPY${1}_FLAT"
 	opts=""
 	[ "$upd" = 1 ] && opts="-u"
@@ -112,11 +114,19 @@ load_copy() {
 	dst=$(spec "$th" "$tp/")
 }
 rs() { # rsync with this step's options; backups go to the recycle bin
-	if [ -n "$bk" ]; then $RS $opts -b "--backup-dir=$bk" "$@"; else $RS $opts "$@"; fi
+	if [ -z "$bk" ]; then $RS $opts "$@"
+	elif [ "$th" != "$RUNNER" ]; then $RS $opts -b "--backup-dir=$(esc "$bk")" "$@"
+	elif [ "$fh" = "$RUNNER" ]; then $RS $opts -b "--backup-dir=$bk" "$@"
+	else
+		# Pulling from the UNAS: rsync 3.0.7 also sends --backup-dir to the remote sender, unquoted,
+		# so give it a link without spaces (the job folder) that points at the real backup folder.
+		mkdir -p "$bk" && ln -sfn "$bk" "$(pwd)/backup.$ci" || return 1
+		$RS $opts -b "--backup-dir=$(pwd)/backup.$ci" "$@"
+	fi
 }
 make_chunks() { # n: split the work list into STREAMS chunk files
 	if [ "$list" = ALL ]; then
-		printf 'cd %s && ls -A\n' "$(q "$fp")" | on "$fh" > top.$1 || return 1
+		printf '%s\n' "$fp" | nm "$fh" ls > top.$1 || return 1
 		L=top.$1
 	else
 		L=$list
@@ -127,7 +137,7 @@ make_chunks() { # n: split the work list into STREAMS chunk files
 
 copy_op() {
 	load_copy $1
-	printf 'mkdir -p %s\n' "$(q "$tp")" | on "$th" || return 1
+	printf '%s\n' "$tp" | nm "$th" mkdir || return 1
 	make_chunks $1 || return 1
 	pids=""
 	i=0
@@ -166,41 +176,9 @@ copy_op() {
 hash_tree() {
 	echo "$1" > hhost.$3
 	{
-		printf 'R=%s\nN=%s\nL=/tmp/nasmover.$$.list\n' "$(q "$2")" "$STREAMS"
-		if [ -n "$4" ]; then
-			echo "cat > \"\$L\" <<'NASMOVER_EOF'"
-			cat "$4"
-			echo NASMOVER_EOF
-		fi
-		[ -n "$4" ] || echo 'FIND=1'
-		cat <<'EOS'
-cd "$R" || exit 1
-if [ -n "$FIND" ]; then
-	find . \( -name @Recycle -o -name "_NAS Mover Recycle" -o -name .@__thumb -o -name .@upload_cache -o -name .@__qini -o -name .trashcan \
-		-o -name .TemporaryItems -o -name .Trashes -o -name .Spotlight-V100 -o -name .fseventsd -o -name ascmhl \
-		-o -name .streams -o -name '.nasmover-staging-*' \) -prune \
-		-o -type f ! -name .DS_Store ! -name '._*' ! -name Thumbs.db -print | sed 's|^\./||' > "$L"
-fi
-echo "T $(wc -l < "$L" | tr -d ' ')"
-tr '\n' '\0' < "$L" | xargs -0 stat -c 'S %s %Y %n'
-awk -v n="$N" -v pre="$L.c." '{ f = pre "" (NR % n); print > f }' "$L"
-# Report each checksum as soon as it's done: GNU md5sum otherwise holds output in large buffers.
-# Each line must reach the shared output in one write, or the parallel workers' lines interleave
-# (mawk -W interactive writes unbuffered, piece by piece). GNU sed -u and busybox awk + fflush both write whole lines.
-SB=""
-command -v stdbuf >/dev/null 2>&1 && SB="stdbuf -oL"
-for c in "$L".c.*; do
-	[ -f "$c" ] || continue
-	if [ -n "$SB" ] && echo x | sed -u 's/^/H /' >/dev/null 2>&1; then
-		tr '\n' '\0' < "$c" | xargs -0 $SB md5sum | sed -u 's/^/H /' &
-	else
-		tr '\n' '\0' < "$c" | xargs -0 md5sum | awk '{ print "H " $0; fflush() }' &
-	fi
-done
-wait
-rm -f "$L" "$L".c.*
-EOS
-	} | on "$1" > hashraw.$3 2>> err.hash.$3
+		printf '%s\n%s\n' "$2" "$STREAMS"
+		if [ -n "$4" ]; then echo LIST; cat "$4"; else echo FIND; fi
+	} | nm "$1" hash > hashraw.$3 2>> err.hash.$3
 	awk -v H="hash.$3" -v S="stat.$3" '
 		$1 == "T" { total = $2; next }
 		$1 == "H" {
@@ -251,13 +229,7 @@ c4_id() { # file -> C4 ID (base58 SHA-512, as used by the ASC MHL chain)
 # Pulls the existing ASC MHL history for root: prev.tsv (md5 TAB path TAB lastmodificationdate), latest wins.
 # Also sets NEXT_SEQ.
 load_history() { # host root
-	{
-		printf 'R=%s\n' "$(q "$2")"
-		cat <<'EOS'
-cd "$R/ascmhl" 2>/dev/null || exit 0
-ls | grep -E '^[0-9]+_.*\.mhl$' | sort | while IFS= read -r f; do echo "@@FILE $f"; cat "$f"; done
-EOS
-	} | on "$1" > history.raw
+	printf '%s\n' "$2" | nm "$1" history > history.raw
 	NEXT_SEQ=$(awk '/^@@FILE / { s = $2; sub(/_.*/, "", s); s = s + 0; if (s > m) m = s } END { print m + 1 }' history.raw)
 	# Only <hash> entries describe files; skip directory and root hashes.
 	awk '
@@ -325,26 +297,9 @@ write_mhl() {
 	' prev.tsv stat.$3 hash.$3.sorted > gen.mhl
 	c4=$(c4_id gen.mhl)
 	{
-		printf 'R=%s\nN=%s\nS=%s\nC=%s\n' "$(q "$2")" "$(q "$name")" "$NEXT_SEQ" "$c4"
-		cat <<'EOS'
-mkdir -p "$R/ascmhl" && cd "$R/ascmhl" || exit 1
-cat > "$N" <<'NASMOVER_MHL_EOF'
-EOS
+		printf '%s\n%s\n%s\n%s\n' "$2" "$name" "$NEXT_SEQ" "$c4"
 		cat gen.mhl
-		cat <<'EOS'
-NASMOVER_MHL_EOF
-entry="  <hashlist sequencenr=\"$S\">
-    <path>$N</path>
-    <c4>$C</c4>
-  </hashlist>"
-if [ -f ascmhl_chain.xml ] && grep -q '</ascmhldirectory>' ascmhl_chain.xml; then
-	grep -v '</ascmhldirectory>' ascmhl_chain.xml > ascmhl_chain.xml.tmp
-else
-	printf '%s\n%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<ascmhldirectory xmlns="urn:ASC:MHL:DIRECTORY:v2.0">' > ascmhl_chain.xml.tmp
-fi
-printf '%s\n%s\n' "$entry" '</ascmhldirectory>' >> ascmhl_chain.xml.tmp && mv ascmhl_chain.xml.tmp ascmhl_chain.xml
-EOS
-	} | on "$1" || return 1
+	} | nm "$1" writemhl || return 1
 	[ "$1" = unas ] && fix_unas_perms "$2/ascmhl"
 	echo "$name" >> manifests
 	return 0
@@ -380,43 +335,10 @@ verify_op() { # n: MD5 both sides, compare; writes mismatch.n
 
 recycle_op() {
 	eval "h=\$RECYCLE${1}_HOST root=\$RECYCLE${1}_ROOT dest=\$RECYCLE${1}_DEST rlist=\$RECYCLE${1}_LIST"
-	if [ "$rlist" = CONTENTS ]; then
-		{
-			printf 'R=%s\nD=%s\n' "$(q "$root")" "$(q "$dest")"
-			cat <<'EOS'
-cd "$R" || exit 1
-mkdir -p "$D" || exit 1
-fail=0
-for p in * .[!.]* ..?*; do
-	[ -e "$p" ] || [ -L "$p" ] || continue
-	# Leave the NAS's own system folders and the recycle folder itself.
-	case "$p" in "_NAS Mover Recycle"|@*|.@*|.streams|.DS_Store|.trashcan|.TemporaryItems|.Trashes|.Spotlight-V100|.fseventsd) continue ;; esac
-	mv "./$p" "$D/" || fail=1
-done
-exit $fail
-EOS
-		} | on "$h" || return 1
-	elif [ "$rlist" = SELF ]; then
-		{
-			printf 'R=%s\nD=%s\n' "$(q "$root")" "$(q "$dest")"
-			cat <<'EOS'
-mkdir -p "$D" && mv "$R" "$D/"
-EOS
-		} | on "$h" || return 1
-	else
-		{
-			printf 'R=%s\nD=%s\n' "$(q "$root")" "$(q "$dest")"
-			cat <<'EOS'
-cd "$R" || exit 1
-while IFS= read -r p; do
-	[ -e "$p" ] || [ -L "$p" ] || continue
-	mkdir -p "$D/$(dirname "$p")" && mv "$p" "$D/$p"
-done <<'NASMOVER_EOF'
-EOS
-			cat "$rlist"
-			echo NASMOVER_EOF
-		} | on "$h" || return 1
-	fi
+	case "$rlist" in
+		CONTENTS|SELF) printf '%s\n%s\n%s\n' "$rlist" "$root" "$dest" | nm "$h" recycle || return 1 ;;
+		*) { printf 'LIST\n%s\n%s\n' "$root" "$dest"; cat "$rlist"; } | nm "$h" recycle || return 1 ;;
+	esac
 	[ "$h" = unas ] && fix_unas_perms "$(bin_root "$dest")"
 	return 0
 }
@@ -539,44 +461,16 @@ audit() {
 # Moves verified files out of the staging folder to sit beside the live ones as "name<suffix>.ext".
 beside_op() {
 	{
-		printf 'S=%s\nD=%s\nX=%s\n' "$(q "$BESIDE_STAGING")" "$(q "$BESIDE_DEST")" "$(q "$BESIDE_SUFFIX")"
-		cat <<'EOS'
-fail=0
-while IFS= read -r p; do
-	[ -n "$p" ] || continue
-	[ -f "$S/$p" ] || { echo "missing in staging: $p" >&2; fail=1; continue; }
-	dir=$(dirname "$p"); base=$(basename "$p")
-	case "$base" in ?*.*) stem=${base%.*}; ext=".${base##*.}" ;; *) stem=$base; ext="" ;; esac
-	mkdir -p "$D/$dir" || { fail=1; continue; }
-	t="$D/$dir/$stem$X$ext"; i=2
-	while [ -e "$t" ]; do t="$D/$dir/$stem$X $i$ext"; i=$((i + 1)); done
-	mv "$S/$p" "$t" || fail=1
-done <<'NASMOVER_EOF'
-EOS
+		printf '%s\n%s\n%s\n' "$BESIDE_STAGING" "$BESIDE_DEST" "$BESIDE_SUFFIX"
 		cat "$BESIDE_LIST"
-		echo NASMOVER_EOF
-		cat <<'EOS'
-# Only remove the staging folder once nothing is left in it.
-[ -z "$(find "$S" -type f | head -1)" ] && rm -rf "$S"
-exit $fail
-EOS
-	} | on "$BESIDE_HOST" 2>> err.beside || return 1
+	} | nm "$BESIDE_HOST" beside 2>> err.beside || return 1
 	[ "$BESIDE_HOST" = unas ] && fix_unas_perms "$BESIDE_DEST"
 	return 0
 }
 
 # Refuses to retire if anything in the stale folder changed since it was checked.
 retire_check() {
-	{
-		printf 'R=%s\n' "$(q "$RETIRE_ROOT")"
-		cat <<'EOS'
-cd "$R" || exit 1
-find . \( -name @Recycle -o -name "_NAS Mover Recycle" -o -name .@__thumb -o -name .@upload_cache -o -name .@__qini -o -name .trashcan \
-	-o -name .TemporaryItems -o -name .Trashes -o -name .Spotlight-V100 -o -name .fseventsd -o -name ascmhl \
-	-o -name .streams -o -name '.nasmover-staging-*' \) -prune \
-	-o -type f ! -name .DS_Store ! -name '._*' ! -name Thumbs.db -print | sed 's|^\./||' | tr '\n' '\0' | xargs -0 -r stat -c '%s %Y %n'
-EOS
-	} | on "$RETIRE_HOST" > retire.now 2>> err.retire || return 1
+	printf '%s\n' "$RETIRE_ROOT" | nm "$RETIRE_HOST" retirescan > retire.now 2>> err.retire || return 1
 	awk -F'\t' '
 		FILENAME == ARGV[1] { want[$3] = $1 " " $2; next }
 		{
