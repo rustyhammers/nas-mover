@@ -156,19 +156,20 @@ final class ShareStore: ObservableObject {
     func reload() async {
         errors = [:]
         guard AppSettings.shared.isConfigured else { return }
-        await withTaskGroup(of: (HostID, Result<[Share], Error>).self) { g in
-            for h in HostID.allCases {
-                g.addTask {
-                    do { return (h, .success(try await NAS.shares(h))) } catch { return (h, .failure(error)) }
-                }
-            }
-            for await (h, r) in g {
-                switch r {
-                case .success(let s): shares[h] = s
-                case .failure(let e): errors[h] = e.localizedDescription
-                }
+        // Load both boxes at once, each into its own slot. (A task group here once filed the UNAS
+        // list under the QNAP: the QNAP side then showed UNAS shares and the UNAS dot stayed grey.)
+        async let q = Self.load(.qnap)
+        async let u = Self.load(.unas)
+        for (h, r) in [(HostID.qnap, await q), (HostID.unas, await u)] {
+            switch r {
+            case .success(let s): shares[h] = s
+            case .failure(let e): errors[h] = e.localizedDescription
             }
         }
+    }
+
+    private nonisolated static func load(_ h: HostID) async -> Result<[Share], Error> {
+        do { return .success(try await NAS.shares(h)) } catch { return .failure(error) }
     }
 
     func list(_ h: HostID) -> [Share] { shares[h] ?? [] }
