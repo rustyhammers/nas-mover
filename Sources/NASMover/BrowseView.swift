@@ -33,6 +33,7 @@ struct BrowseView: View {
                     ForEach(shares.list(host)) { s in Text(s.name).tag(Share?.some(s)) }
                 }
                 .labelsHidden()
+                .id(shares.list(host).map(\.id).joined(separator: "|") + host.rawValue)
                 .frame(maxWidth: 260)
                 Spacer()
                 Button { showRecycle = true } label: { Label("Recycle Folders…", systemImage: "trash") }

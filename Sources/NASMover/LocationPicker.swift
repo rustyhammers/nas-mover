@@ -36,6 +36,9 @@ struct LocationPicker: View {
                 ForEach(shares.list(host)) { s in Text(s.name).tag(Share?.some(s)) }
             }
             .labelsHidden()
+            // macOS keeps a menu Picker's old items when only the list changes (selection stays nil),
+            // so switching NAS showed the other box's shares. Rebuild it whenever the list changes.
+            .id(shareMenuID)
 
             if let loc = location, loc.host == host {
                 HStack(spacing: 6) {
@@ -172,6 +175,8 @@ struct LocationPicker: View {
     private var filteredFolders: [String] {
         filter.isEmpty ? folders : folders.filter { $0.localizedCaseInsensitiveContains(filter) }
     }
+
+    private var shareMenuID: String { host.rawValue + "|" + shares.list(host).map(\.id).joined(separator: "|") }
 
     private var shareBinding: Binding<Share?> {
         Binding(
