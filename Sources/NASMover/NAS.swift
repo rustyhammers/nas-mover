@@ -228,7 +228,9 @@ enum NAS {
     static func sizes(_ loc: Location, _ names: [String]) async throws -> [String: Int64] {
         guard !names.isEmpty else { return [:] }
         let args = names.map { shq("./" + $0) }.joined(separator: " ")
-        let out = try await SSH.check(target(loc.host), "cd \(shq(loc.fullPath)) && du -sk \(args) 2>/dev/null; true")
+        // Lowest priority so browsing never slows a running job or backup (QNAP busybox has neither tool).
+        let low = "N=; command -v nice >/dev/null && N='nice -n 19'; command -v ionice >/dev/null && N=\"ionice -c3 $N\"; "
+        let out = try await SSH.check(target(loc.host), low + "cd \(shq(loc.fullPath)) && $N du -sk \(args) 2>/dev/null; true")
         var result: [String: Int64] = [:]
         for line in out.split(separator: "\n") {
             let f = line.split(separator: "\t", maxSplits: 1)

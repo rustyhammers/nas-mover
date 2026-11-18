@@ -12,12 +12,12 @@ struct BrowseView: View {
     @State private var selection = Set<String>()
     @State private var filter = ""
     @State private var loading = false
-    @State private var sizing = false
     @State private var working = false
     @State private var error: String?
     @State private var notice: String?
     @State private var confirmDelete = false
     @State private var showRecycle = false
+    @ObservedObject private var sizeCache = SizeCache.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -64,7 +64,8 @@ struct BrowseView: View {
                     }
                     .width(min: 260, ideal: 480)
                     TableColumn("Size") { e in
-                        Text(e.size.map(fmtBytes) ?? (e.isDir ? "—" : "")).monospacedDigit().foregroundStyle(e.size == nil ? .secondary : .primary)
+                        if e.isDir { FolderSizeText(parent: loc, name: e.name) }
+                        else { Text(e.size.map(fmtBytes) ?? "").monospacedDigit() }
                     }
                     .width(min: 80, ideal: 100)
                     TableColumn("Modified") { e in
@@ -76,7 +77,7 @@ struct BrowseView: View {
                     if ids.count == 1, let e = entries.first(where: { $0.name == ids.first }), e.isDir {
                         Button("Open") { open(loc.child(e.name)) }
                     }
-                    Button("Calculate Size") { Task { await measure(Array(ids)) } }
+                    Button("Recalculate Size") { measure(Array(ids)) }
                     if !inRecycle {
                         Divider()
                         Button("Delete…", role: .destructive) { selection = ids; confirmDelete = true }
@@ -99,10 +100,10 @@ struct BrowseView: View {
                         Text(selectionSummary).foregroundStyle(.secondary).monospacedDigit()
                     }
                     Spacer()
-                    if sizing || working { ProgressView().controlSize(.small) }
-                    Button("Calculate Sizes") { Task { await measure(selection.isEmpty ? entries.filter(\.isDir).map(\.name) : Array(selection)) } }
-                        .disabled(sizing || entries.isEmpty)
-                        .help(selection.isEmpty ? "Measure every folder here" : "Measure the selected items")
+                    if working { ProgressView().controlSize(.small) }
+                    Button("Recalculate Sizes") { measure(selection.isEmpty ? entries.filter(\.isDir).map(\.name) : Array(selection)) }
+                        .disabled(entries.isEmpty)
+                        .help(selection.isEmpty ? "Measure every folder here again" : "Measure the selected folders again")
                     if inRecycle {
                         Button("Empty in Recycle Folders…") { showRecycle = true }
                     } else {
@@ -150,7 +151,14 @@ struct BrowseView: View {
         )
     }
 
-    private var selected: [Entry] { entries.filter { selection.contains($0.name) } }
+    /// Entries with folder sizes filled in from the size cache as they arrive.
+    private var selected: [Entry] {
+        entries.filter { selection.contains($0.name) }.map { e in
+            var e = e
+            if e.isDir, let loc = location { e.size = sizeCache.size(loc, e.name) }
+            return e
+        }
+    }
 
     private var selectionSummary: String {
         if selection.isEmpty { return "\(entries.filter(\.isDir).count) folders · \(entries.filter { !$0.isDir }.count) files" }
@@ -186,9 +194,8 @@ struct BrowseView: View {
         loading = true
         error = nil
         do {
-            let fresh = try await NAS.entries(loc)
-            let known = Dictionary(entries.compactMap { e in e.isDir ? e.size.map { (e.name, $0) } : nil }, uniquingKeysWith: { a, _ in a })
-            entries = fresh.map { e in var e = e; if e.isDir, let s = known[e.name] { e.size = s }; return e }
+            entries = try await NAS.entries(loc)
+            SizeCache.shared.request("browse", loc, entries.filter(\.isDir).map(\.name))
             selection = selection.filter { n in entries.contains { $0.name == n } }
         } catch {
             entries = []
@@ -197,14 +204,10 @@ struct BrowseView: View {
         loading = false
     }
 
-    private func measure(_ names: [String]) async {
-        guard let loc = location, !names.isEmpty else { return }
-        sizing = true
-        do {
-            let sizes = try await NAS.sizes(loc, names)
-            for i in entries.indices { if let s = sizes[entries[i].name] { entries[i].size = s } }
-        } catch { self.error = error.localizedDescription }
-        sizing = false
+    private func measure(_ names: [String]) {
+        guard let loc = location else { return }
+        let dirs = names.filter { n in entries.contains { $0.name == n && $0.isDir } }
+        SizeCache.shared.request("browse", loc, dirs, force: true)
     }
 
     private func delete() async {
@@ -214,6 +217,7 @@ struct BrowseView: View {
         let names = selected.map(\.name)
         do {
             try await NAS.moveToRecycle(loc, names)
+            SizeCache.shared.invalidate(loc)
             notice = "Moved \(names.count) item\(names.count == 1 ? "" : "s") to \(loc.share.binName)."
             selection = []
             entries.removeAll { names.contains($0.name) }

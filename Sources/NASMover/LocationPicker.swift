@@ -19,6 +19,7 @@ struct LocationPicker: View {
     @State private var pendingDelete: [Location] = []
     @State private var deleting = false
     @State private var notice: String?
+    @State private var sizeOwner = UUID().uuidString
 
     private var multi: Bool { checked != nil }
 
@@ -78,6 +79,7 @@ struct LocationPicker: View {
                                     Image(systemName: "folder.fill").foregroundStyle(.blue)
                                     Text(name)
                                     Spacer()
+                                    FolderSizeText(parent: loc, name: name)
                                     Image(systemName: "chevron.right").foregroundStyle(.secondary)
                                 }
                                 .contentShape(Rectangle())
@@ -166,6 +168,7 @@ struct LocationPicker: View {
                 failures.append("\(parent.breadcrumb): \(error.localizedDescription)")
             }
         }
+        for parent in groups.keys { SizeCache.shared.invalidate(parent) }
         if done > 0 { notice = "Moved \(done) folder\(done == 1 ? "" : "s") to the recycle bin." }
         await load()
         if !failures.isEmpty { error = "Couldn't delete everything — " + failures.joined(separator: "; ") }
@@ -219,7 +222,10 @@ struct LocationPicker: View {
         loading = true
         error = nil
         if !deleting { notice = nil }
-        do { folders = try await NAS.folders(loc) } catch {
+        do {
+            folders = try await NAS.folders(loc)
+            SizeCache.shared.request(sizeOwner, loc, folders)
+        } catch {
             folders = []
             self.error = error.localizedDescription
         }
